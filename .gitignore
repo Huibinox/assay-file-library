@@ -1,0 +1,13 @@
+Assay File库/
+__pycache__/
+*.pyc
+*.db
+*.db-*
+build/
+dist/
+*.spec
+*.exe
+*.zip
+*.doc
+*.docx
+*.pdf
