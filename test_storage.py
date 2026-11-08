@@ -117,6 +117,58 @@ with lib.lock(sys.argv[2]):
         with self.assertRaises(ValueError):
             self.lib.list_projects()
 
+    def test_delete_restore_record_preserves_files_and_invalidates_old_update(self):
+        first = self.save()
+        self.lib.delete_record(PID, first['id'], first['version'])
+        self.assertEqual(self.lib.load(PID)['records'], [])
+        self.assertTrue(self.lib.resolve(first['source']).exists())
+        item = self.lib.recycle_items()[0]
+        with self.assertRaises(ConflictError):
+            self.save(first['version'])
+        self.lib.restore(PID, item['token'])
+        self.assertEqual(len(self.lib.load(PID)['records']), 1)
+        with self.assertRaises(ConflictError):
+            self.save(first['version'])
+        with self.assertRaises(ConflictError):
+            self.lib.restore(PID, item['token'])
+
+    def test_delete_project_blocks_writes_and_restore_preserves_trash(self):
+        first = self.save()
+        self.lib.delete_record(PID, first['id'], first['version'])
+        data = self.lib.load(PID)
+        self.lib.delete_project(PID, data['revision'])
+        self.assertEqual(self.lib.list_projects(), [])
+        for operation in [lambda: self.lib.create(PID), self.save,
+                          lambda: self.lib.set_expiry(PID, None, data['revision'])]:
+            with self.assertRaises(ConflictError):
+                operation()
+        item = self.lib.recycle_items()[0]
+        self.lib.restore(PID, expected_revision=item['revision'])
+        self.assertEqual(len(self.lib.list_projects()), 1)
+        self.assertIsNotNone(self.lib.recycle_items()[0]['token'])
+
+    def test_stale_delete_and_failed_delete_do_not_hide_current(self):
+        first = self.save()
+        second = self.save(first['version'])
+        with self.assertRaises(ConflictError):
+            self.lib.delete_record(PID, first['id'], first['version'])
+        with self.assertRaises(ConflictError):
+            self.lib.delete_project(PID, 0)
+        with patch('storage.os.replace', side_effect=OSError('network interrupted')):
+            with self.assertRaises(OSError):
+                self.lib.delete_record(PID, second['id'], second['version'])
+        self.assertEqual(len(self.lib.load(PID)['records']), 1)
+        self.assertEqual(self.lib.recycle_items(), [])
+
+    def test_schema2_upgrade_and_schema3_blocks_old_clients(self):
+        self.lib.create(PID)
+        p = self.lib.folder(PID) / 'project.json'
+        data = self.lib.load(PID)
+        data['schema'] = 2
+        p.write_text(json.dumps(data), encoding='utf-8')
+        self.lib.set_expiry(PID, None, data['revision'])
+        self.assertEqual(self.lib.load(PID)['schema'], 3)
+
 
 if __name__ == '__main__':
     unittest.main()

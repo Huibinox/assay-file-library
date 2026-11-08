@@ -62,7 +62,7 @@ class App:
         self.busy = False
         self.events = queue.Queue()
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.2.0 共享盘版')
+        root.title('Assay File 库 · v0.2.1 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -103,7 +103,7 @@ class App:
         actions = ttk.Frame(root, padding=16)
         actions.pack(fill='x')
         for label, fn in [('预览 PDF', self.preview), ('打开 Word 副本', self.open_file),
-                          ('打印所选记录', self.print_file), ('更新所选记录', self.update), ('查看历史', self.history)]:
+                          ('打印所选记录', self.print_file), ('更新所选记录', self.update), ('查看历史', self.history), ('删除所选项', self.delete_selected), ('回收站', self.recycle_bin)]:
             ttk.Button(actions, text=label, command=fn).pack(side='left', padx=4)
         ttk.Label(root, textvariable=self.note, padding=(16, 0, 16, 12), wraplength=1100).pack(fill='x')
         if library:
@@ -198,9 +198,10 @@ class App:
         pid, cached = self.records[selected[2:]]
         try:
             data = self.library.load(pid)
+            self.library.require_active(data)
             record = next(r for r in data['records'] if r['id'] == cached['id'])
             return pid, record
-        except (OSError, ValueError, StopIteration) as exc:
+        except (OSError, ValueError, StopIteration, ConflictError) as exc:
             messagebox.showerror('无法读取记录', '请检查共享盘连接并刷新。\n' + str(exc))
             return None
 
@@ -396,8 +397,10 @@ class App:
         if messagebox.askokcancel('确认打印', f'项目：{pid}\n记录：{r["name"]}\n更新时间：{r["updated"]}\n\n将通过系统关联程序发送到默认打印机。'):
             try:
                 # Recheck after the confirmation dialog to avoid silently printing an old revision.
-                current = next(x for x in self.library.load(pid)['records'] if x['id'] == r['id'])
-                if current['version'] != r['version']:
+                data = self.library.load(pid)
+                self.library.require_active(data)
+                current = next((x for x in data['records'] if x['id'] == r['id']), None)
+                if current is None or current['version'] != r['version']:
                     raise ConflictError('确认期间该记录已更新，请刷新后重新打印。')
                 if self.launch(self.local_copy(r['pdf'] or r['source']), 'print'):
                     self.note.set('已请求系统打印，请在打印队列确认；当前打印的是确认时选中的版本。')
@@ -428,6 +431,67 @@ class App:
                 except (OSError, ValueError) as exc:
                     self.report_error(exc)
         ttk.Button(win, text='打开所选历史版本副本', command=view).pack(pady=10)
+
+    def delete_selected(self):
+        if not self.ready():
+            return
+        pid = self.project()
+        if not pid:
+            return messagebox.showinfo('选择项目或记录', '请选择要删除的项目或记录。')
+        try:
+            if self.selection().startswith('p:'):
+                data = self.library.load(pid)
+                if not messagebox.askyesno('删除整个项目',
+                        f'{pid}\n包含 {len(data["records"])} 份当前记录及其历史版本。\n\n确定移入回收站？之后可以恢复。'):
+                    return
+                self.library.delete_project(pid, data['revision'])
+            else:
+                item = self.record()
+                if not item:
+                    return
+                pid, record = item
+                if not messagebox.askyesno('删除记录',
+                        f'项目：{pid}\n记录：{record["name"]}\n\n将此记录及其历史版本移入回收站？'):
+                    return
+                self.library.delete_record(pid, record['id'], record['version'])
+            self.refresh()
+            self.note.set('已移入回收站，可恢复。文件仍保留，此操作不释放磁盘空间。')
+        except (OSError, ValueError, BusyError, ConflictError) as exc:
+            self.report_error(exc)
+
+    def recycle_bin(self):
+        if not self.ready():
+            return
+        library = self.library
+        try:
+            items = library.recycle_items()
+        except (OSError, ValueError) as exc:
+            return self.report_error(exc)
+        win = tk.Toplevel(self.root)
+        win.title('回收站')
+        win.geometry('850x400')
+        ttk.Label(win, text='删除项可恢复。文件仍在库中，不释放磁盘空间；本版不提供永久清除。', padding=12).pack(fill='x')
+        listing = tk.Listbox(win, font=('Microsoft YaHei UI', 10))
+        listing.pack(fill='both', expand=True, padx=12)
+        for item in items:
+            listing.insert('end', f'{item["deleted"]} | {item["pid"]} | {item["name"]}')
+        if not items:
+            listing.insert('end', '回收站为空')
+        def restore():
+            selected = listing.curselection()
+            if not items or not selected:
+                return
+            item = items[selected[0]]
+            if not messagebox.askyesno('恢复', f'恢复 {item["pid"]} / {item["name"]}？', parent=win):
+                return
+            try:
+                library.restore(item['pid'], item['token'], item.get('revision'))
+                self.refresh()
+                self.note.set('已恢复删除项。')
+                win.destroy()
+            except (OSError, ValueError, BusyError, ConflictError) as exc:
+                self.report_error(exc)
+        ttk.Button(win, text='恢复所选项', command=restore).pack(pady=12)
 
     def close(self):
         if self.busy:

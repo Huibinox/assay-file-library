@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from datetime import datetime
 
 PATTERN = r'\d{6}-\d{6}-FSA(?:-HGR)?'
 
@@ -50,14 +51,15 @@ class Library:
         if not path.exists():
             return {'schema': 2, 'id': pid, 'expiry': None, 'revision': 0, 'records': []}
         data = json.loads(path.read_text(encoding='utf-8'))
-        if data.get('schema') != 2 or data.get('id') != pid:
+        if data.get('schema') not in (2, 3) or data.get('id') != pid:
             raise ValueError(f'项目数据格式异常：{pid}')
         return data
 
-    def list_projects(self):
+    def list_projects(self, include_deleted=False):
         # Never return an incomplete list if a read fails.
-        return [self.load(p.name) for p in sorted(self.projects_dir.iterdir())
-                if p.is_dir() and re.fullmatch(PATTERN, p.name) and (p / 'project.json').exists()]
+        projects = [self.load(p.name) for p in sorted(self.projects_dir.iterdir())
+                    if p.is_dir() and re.fullmatch(PATTERN, p.name) and (p / 'project.json').exists()]
+        return [p for p in projects if include_deleted or not p.get('deleted')]
 
     @contextlib.contextmanager
     def lock(self, pid):
@@ -91,18 +93,21 @@ class Library:
             f.close()
 
     def write(self, data):
+        data['schema'] = 3
         data['revision'] += 1
         atomic_json(self.folder(data['id']) / 'project.json', data)
 
     def create(self, pid):
         with self.lock(pid):
             data = self.load(pid)
+            self.require_active(data)
             if not (self.folder(pid) / 'project.json').exists():
                 self.write(data)
 
     def set_expiry(self, pid, expiry, expected_revision):
         with self.lock(pid):
             data = self.load(pid)
+            self.require_active(data)
             if data['revision'] != expected_revision:
                 raise ConflictError('项目已被其他电脑更新，请刷新后重新填写有效期。')
             data['expiry'] = expiry
@@ -118,6 +123,7 @@ class Library:
         """Copy immutable files first; atomically publish only after all copies succeed."""
         with self.lock(pid):
             data = self.load(pid)
+            self.require_active(data)
             old = next((r for r in data['records'] if r['id'] == rid), None)
             if expected is not None and (old is None or old['version'] != expected):
                 raise ConflictError('该记录已被其他电脑更新，本次不会覆盖。请刷新并核对最新版本。')
@@ -143,3 +149,63 @@ class Library:
                 data['records'].append(entry)
             self.write(data)
             return entry
+
+    @staticmethod
+    def require_active(data):
+        if data.get('deleted'):
+            raise ConflictError('项目已在回收站中，请先恢复项目。')
+
+    def delete_project(self, pid, expected_revision):
+        with self.lock(pid):
+            data = self.load(pid)
+            self.require_active(data)
+            if data['revision'] != expected_revision:
+                raise ConflictError('项目已更新，请刷新后再删除。')
+            data['deleted'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.write(data)
+
+    def delete_record(self, pid, rid, expected_version):
+        with self.lock(pid):
+            data = self.load(pid)
+            self.require_active(data)
+            record = next((r for r in data['records'] if r['id'] == rid), None)
+            if not record or record['version'] != expected_version:
+                raise ConflictError('记录已更新或删除，请刷新后再操作。')
+            data['records'].remove(record)
+            data.setdefault('trash', []).append({'token': uuid.uuid4().hex, 'record': record,
+                'deleted': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+            self.write(data)
+
+    def recycle_items(self):
+        items = []
+        for data in self.list_projects(include_deleted=True):
+            if data.get('deleted'):
+                items.append({'pid': data['id'], 'token': None, 'name': '整个项目',
+                              'deleted': data['deleted'], 'revision': data['revision']})
+            else:
+                for item in data.get('trash', []):
+                    items.append({'pid': data['id'], 'token': item['token'],
+                                  'name': item['record']['name'], 'deleted': item['deleted']})
+        return items
+
+    def restore(self, pid, token=None, expected_revision=None):
+        with self.lock(pid):
+            data = self.load(pid)
+            if token is None:
+                if not data.get('deleted') or data['revision'] != expected_revision:
+                    raise ConflictError('回收站内容已变化，请重新打开回收站。')
+                data.pop('deleted')
+                for record in data['records']:
+                    record['version'] = uuid.uuid4().hex
+            else:
+                self.require_active(data)
+                item = next((t for t in data.get('trash', []) if t['token'] == token), None)
+                if item is None:
+                    raise ConflictError('该记录已被恢复，请刷新。')
+                record = dict(item['record'])
+                if any(r['id'] == record['id'] for r in data['records']):
+                    raise ConflictError('记录编号冲突，无法恢复。')
+                record['version'] = uuid.uuid4().hex
+                data['records'].append(record)
+                data['trash'].remove(item)
+            self.write(data)
