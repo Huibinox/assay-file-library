@@ -12,11 +12,19 @@ from datetime import datetime
 PATTERN = r'\d{6}-\d{6}-FSA(?:-HGR)?'
 
 
+def name_key(name):
+    return name.strip().casefold()
+
+
 class BusyError(Exception):
     pass
 
 
 class ConflictError(Exception):
+    pass
+
+
+class DuplicateNameError(ConflictError):
     pass
 
 
@@ -129,6 +137,9 @@ class Library:
                 raise ConflictError('该记录已被其他电脑更新，本次不会覆盖。请刷新并核对最新版本。')
             if expected is None and old is not None:
                 raise ConflictError('记录编号已存在，请重新导入。')
+            # An existing legacy duplicate may still update its own document.
+            if old is None or name_key(old['name']) != name_key(name):
+                self.check_name(data, name, rid)
             version = uuid.uuid4().hex
             folder = self.folder(pid) / 'records' / rid / version
             folder.mkdir(parents=True)
@@ -154,6 +165,15 @@ class Library:
     def require_active(data):
         if data.get('deleted'):
             raise ConflictError('项目已在回收站中，请先恢复项目。')
+
+    @staticmethod
+    def check_name(data, name, exclude_id=None):
+        if not name.strip():
+            raise ValueError('记录名称不能为空。')
+        if any(r['id'] != exclude_id and name_key(r['name']) == name_key(name)
+               for r in data['records']):
+            raise DuplicateNameError(f'项目 {data["id"]} 已有同名记录“{name.strip()}”。\n'
+                                     '如需替换文档，请使用“更新所选记录”；如为不同记录，请更改名称。')
 
     def delete_project(self, pid, expected_revision):
         with self.lock(pid):
@@ -203,6 +223,7 @@ class Library:
                 if item is None:
                     raise ConflictError('该记录已被恢复，请刷新。')
                 record = dict(item['record'])
+                self.check_name(data, record['name'])
                 if any(r['id'] == record['id'] for r in data['records']):
                     raise ConflictError('记录编号冲突，无法恢复。')
                 record['version'] = uuid.uuid4().hex

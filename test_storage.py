@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from storage import Library, BusyError, ConflictError
+from storage import Library, BusyError, ConflictError, DuplicateNameError
 
 PID = '123456-654321-FSA'
 OTHER = '123456-654322-FSA-HGR'
@@ -168,6 +168,32 @@ with lib.lock(sys.argv[2]):
         p.write_text(json.dumps(data), encoding='utf-8')
         self.lib.set_expiry(PID, None, data['revision'])
         self.assertEqual(self.lib.load(PID)['schema'], 3)
+
+    def test_duplicate_name_blocked_but_other_project_and_update_allowed(self):
+        first = self.save()
+        with self.assertRaises(DuplicateNameError):
+            self.lib.commit_record(PID, 'other', ' 正式-4样本 ', self.source,
+                                   None, None, 'today')
+        self.assertEqual(len(self.lib.load(PID)['records']), 1)
+        self.lib.commit_record(OTHER, 'other', '正式-4样本', self.source, None, None, 'today')
+        self.save(first['version'])
+
+    def test_case_insensitive_and_empty_name(self):
+        self.lib.commit_record(PID, 'one', 'Assay A', self.source, None, None, 'today')
+        with self.assertRaises(DuplicateNameError):
+            self.lib.commit_record(PID, 'two', ' assay a ', self.source, None, None, 'today')
+        with self.assertRaises(ValueError):
+            self.lib.commit_record(PID, 'two', '  ', self.source, None, None, 'today')
+
+    def test_restore_duplicate_rejected_and_trash_preserved(self):
+        first = self.save()
+        self.lib.delete_record(PID, first['id'], first['version'])
+        item = self.lib.recycle_items()[0]
+        self.lib.commit_record(PID, 'new', first['name'], self.source, None, None, 'today')
+        with self.assertRaises(DuplicateNameError):
+            self.lib.restore(PID, item['token'])
+        self.assertEqual(len(self.lib.recycle_items()), 1)
+        self.assertEqual(len(self.lib.load(PID)['records']), 1)
 
 
 if __name__ == '__main__':

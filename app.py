@@ -12,7 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from storage import Library, PATTERN, BusyError, ConflictError, atomic_json
+from storage import Library, PATTERN, BusyError, ConflictError, DuplicateNameError, name_key, atomic_json
 
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 CONFIG = Path(os.environ.get('LOCALAPPDATA', str(BASE))) / 'AssayFileLibrary' / 'settings.json'
@@ -62,7 +62,7 @@ class App:
         self.busy = False
         self.events = queue.Queue()
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.2.1 共享盘版')
+        root.title('Assay File 库 · v0.2.2 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -235,7 +235,7 @@ class App:
             self.print_file()
 
     def report_error(self, exc):
-        title = '稍后再试' if isinstance(exc, BusyError) else '内容已更新' if isinstance(exc, ConflictError) else '操作失败'
+        title = '同名记录提醒' if isinstance(exc, DuplicateNameError) else '稍后再试' if isinstance(exc, BusyError) else '内容已更新' if isinstance(exc, ConflictError) else '操作失败'
         messagebox.showerror(title, str(exc))
 
     def add_project(self):
@@ -284,9 +284,22 @@ class App:
             if not re.fullmatch(PATTERN, pid):
                 messagebox.showerror('未导入', '项目号格式不正确。')
                 continue
-            name = simpledialog.askstring('记录名称', f'项目：{pid}\n例如：验证－4样本、正式－11样本', initialvalue=Path(path).stem)
-            if name and name.strip():
-                jobs.append((path, pid, uuid.uuid4().hex, name.strip(), None))
+            name = Path(path).stem
+            while True:
+                name = simpledialog.askstring('记录名称', f'项目：{pid}\n例如：验证－4样本、正式－11样本', initialvalue=name)
+                if name is None:
+                    break
+                try:
+                    self.library.check_name(self.library.load(pid), name)
+                    if any(job[1] == pid and name_key(job[3]) == name_key(name) for job in jobs):
+                        raise DuplicateNameError('本次批量导入已有同名记录，请更改名称或取消此项。')
+                    jobs.append((path, pid, uuid.uuid4().hex, name.strip(), None))
+                    break
+                except (DuplicateNameError, ValueError) as exc:
+                    self.report_error(exc)
+                except OSError as exc:
+                    self.report_error(exc)
+                    break
         self.start_jobs(jobs)
 
     def update(self):
