@@ -127,7 +127,7 @@ class Library:
             raise ValueError('文档路径不在资料库内。')
         return path
 
-    def commit_record(self, pid, rid, name, source, pdf, pages, updated, expected=None, *, inbox=None):
+    def commit_record(self, pid, rid, name, source, pages, updated, expected=None, *, inbox=None):
         """Copy immutable files first; atomically publish only after all copies succeed."""
         with self.lock(pid):
             data = self.load(pid)
@@ -147,12 +147,8 @@ class Library:
             folder.mkdir(parents=True)
             dest = folder / ('document' + Path(source).suffix.lower())
             shutil.copyfile(source, dest)
-            pdf_dest = folder / 'document.pdf'
-            if pdf:
-                shutil.copyfile(pdf, pdf_dest)
             entry = {'id': rid, 'name': name, 'version': version,
                      'source': dest.relative_to(self.root).as_posix(),
-                     'pdf': pdf_dest.relative_to(self.root).as_posix() if pdf else '',
                      'pages': pages, 'updated': updated,
                      'history': [] if old is None else old.get('history', []) +
                      [{k: v for k, v in old.items() if k != 'history'}]}

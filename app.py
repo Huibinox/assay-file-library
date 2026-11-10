@@ -40,9 +40,8 @@ def saved_word_pages(source):
         return None
 
 
-def convert_word(source, directory):
-    pdf = Path(directory) / 'preview.pdf'
-    script = Path(directory) / 'convert.ps1'
+def count_word_pages(source, directory):
+    script = Path(directory) / 'word-pages.ps1'
     script.write_text("""$ErrorActionPreference='Stop'
 $w=$null; $d=$null
 try {
@@ -52,18 +51,17 @@ try {
  $d.Repaginate()
  $n=$d.ComputeStatistics(2)
  Write-Output $n
- $d.ExportAsFixedFormat($args[1],17)
 } finally {
  if($d){$d.Close(0)}
  if($w){$w.Quit()}
 }
 """, encoding='utf-8-sig')
     result = subprocess.run(['powershell', '-NoProfile', '-File',
-                             str(script), str(source), str(pdf)], capture_output=True,
+                             str(script), str(source)], capture_output=True,
                             text=True, encoding='utf-8', errors='replace', timeout=180,
                             creationflags=0x08000000)
     pages = next((int(line) for line in result.stdout.splitlines() if re.fullmatch(r'[1-9][0-9]*', line.strip())), None)
-    return (pdf if result.returncode == 0 and pdf.is_file() else None), pages
+    return pages
 
 
 class App:
@@ -77,7 +75,7 @@ class App:
         self.inbox_seen = {}
         self.inbox_pages = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.2.3 共享盘版')
+        root.title('Assay File 库 · v0.2.4 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -117,7 +115,7 @@ class App:
         self.tree.bind('<ButtonRelease-1>', self.row_click)
         actions = ttk.Frame(root, padding=16)
         actions.pack(fill='x')
-        for label, fn in [('预览 PDF', self.preview), ('打开 Word 副本', self.open_file),
+        for label, fn in [('打开 Word 副本', self.open_file),
                           ('打印所选记录', self.print_file), ('更新所选记录', self.update), ('查看历史', self.history), ('删除所选项', self.delete_selected), ('回收站', self.recycle_bin)]:
             ttk.Button(actions, text=label, command=fn).pack(side='left', padx=4)
         ttk.Label(root, textvariable=self.note, padding=(16, 0, 16, 12), wraplength=1100).pack(fill='x')
@@ -301,7 +299,7 @@ class App:
                 self.records[r['id']] = (pid, r)
                 self.tree.insert(parent, 'end', iid='r:' + r['id'], text=r['name'],
                                  values=(self.word_pages(r), r['updated'], '',
-                                         'PDF 就绪' if r.get('pdf') else '无 PDF，可用 Word', '打印'))
+                                         'Word 就绪', '打印'))
         if selected and self.tree.exists(selected):
             self.tree.selection_set(selected)
 
@@ -395,7 +393,7 @@ class App:
             return
         self.busy = True
         library = self.library
-        self.note.set('正在本机准备文档和 PDF，完成后写入资料库；请勿关闭程序。')
+        self.note.set('正在本机准备 Word 文档，完成后写入资料库；请勿关闭程序。')
         def worker():
             try:
                 for source, pid, rid, name, expected in jobs:
@@ -411,21 +409,14 @@ class App:
                                 if local.suffix == '.docx':
                                     with zipfile.ZipFile(local) as doc:
                                         doc.getinfo('word/document.xml')
-                            pdf, pages = None, None
+                            pages = None
                             try:
-                                pdf, pages = convert_word(local, td)
+                                pages = count_word_pages(local, td)
                             except (OSError, subprocess.SubprocessError):
                                 pass
                             pages = pages or saved_word_pages(local)
-                            if not pdf and not automatic:
-                                reply = threading.Event()
-                                answer = []
-                                self.events.put(('convert_failed', name, reply, answer))
-                                reply.wait()
-                                if not answer[0]:
-                                    continue
                             inbox = source.relative_to(library.root).as_posix().casefold() if automatic else None
-                            result = library.commit_record(pid, rid, name, local, pdf, pages,
+                            result = library.commit_record(pid, rid, name, local, pages,
                                                            datetime.now().strftime('%Y-%m-%d %H:%M'), expected, inbox=inbox)
                             if result:
                                 self.events.put(('saved', name))
@@ -439,11 +430,7 @@ class App:
         try:
             while True:
                 event = self.events.get_nowait()
-                if event[0] == 'convert_failed':
-                    _, name, reply, answer = event
-                    answer.append(messagebox.askyesno('PDF 转换未完成', f'{name}\n\n请检查是否安装 Microsoft Word。\n是否仍保存 Word？\n若正在更新，确认后将使用新版 Word，不再使用旧版 PDF。'))
-                    reply.set()
-                elif event[0] == 'saved':
+                if event[0] == 'saved':
                     self.note.set('已安全保存：' + event[1])
                     self.refresh()
                 elif event[0] == 'error':
@@ -483,17 +470,6 @@ class App:
             except (OSError, ValueError) as exc:
                 self.report_error(exc)
 
-    def preview(self):
-        item = self.record()
-        if item:
-            try:
-                if item[1]['pdf']:
-                    self.launch(self.local_copy(item[1]['pdf']))
-                else:
-                    messagebox.showinfo('无 PDF', '该记录尚无 PDF，可打开 Word 副本查看。')
-            except (OSError, ValueError) as exc:
-                self.report_error(exc)
-
     def print_file(self):
         item = self.record()
         if not item:
@@ -507,7 +483,7 @@ class App:
                 current = next((x for x in data['records'] if x['id'] == r['id']), None)
                 if current is None or current['version'] != r['version']:
                     raise ConflictError('确认期间该记录已更新，请刷新后重新打印。')
-                if self.launch(self.local_copy(r['pdf'] or r['source']), 'print'):
+                if self.launch(self.local_copy(r['source']), 'print'):
                     self.note.set('已请求系统打印，请在打印队列确认；当前打印的是确认时选中的版本。')
             except (OSError, ValueError, ConflictError) as exc:
                 self.report_error(exc)
@@ -532,7 +508,7 @@ class App:
             if rows and selected:
                 entry = rows[selected[0]]
                 try:
-                    self.launch(self.local_copy(entry['pdf'] or entry['source']))
+                    self.launch(self.local_copy(entry['source']))
                 except (OSError, ValueError) as exc:
                     self.report_error(exc)
         ttk.Button(win, text='打开所选历史版本副本', command=view).pack(pady=10)

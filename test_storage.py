@@ -20,15 +20,13 @@ class StorageTests(unittest.TestCase):
         self.lib = Library(self.root / 'shared')
         self.source = self.root / 'input.docx'
         self.source.write_bytes(b'word version one')
-        self.pdf = self.root / 'input.pdf'
-        self.pdf.write_bytes(b'%PDF-test')
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def save(self, expected=None):
         return self.lib.commit_record(PID, 'record1', '正式-4样本', self.source,
-                                      self.pdf, 4, '2026-11-08 12:00', expected)
+                                      4, '2026-11-08 12:00', expected)
 
     def test_create_idempotent_and_validate(self):
         self.lib.create(PID)
@@ -77,13 +75,6 @@ class StorageTests(unittest.TestCase):
                 self.save(first['version'])
         self.assertEqual(self.lib.load(PID)['records'][0]['version'], first['version'])
         self.assertFalse(list(self.lib.folder(PID).glob('.pending-*')))
-
-    def test_no_pdf_update_does_not_reuse_old_pdf(self):
-        first = self.save()
-        second = self.lib.commit_record(PID, 'record1', '正式-4样本', self.source,
-                                        None, None, '2026-11-09', first['version'])
-        self.assertEqual(second['pdf'], '')
-        self.assertTrue(second['history'][0]['pdf'])
 
     def test_cross_process_lock_release_after_crash(self):
         code = '''import sys, time
@@ -173,23 +164,23 @@ with lib.lock(sys.argv[2]):
         first = self.save()
         with self.assertRaises(DuplicateNameError):
             self.lib.commit_record(PID, 'other', ' 正式-4样本 ', self.source,
-                                   None, None, 'today')
+                                   None, 'today')
         self.assertEqual(len(self.lib.load(PID)['records']), 1)
-        self.lib.commit_record(OTHER, 'other', '正式-4样本', self.source, None, None, 'today')
+        self.lib.commit_record(OTHER, 'other', '正式-4样本', self.source, None, 'today')
         self.save(first['version'])
 
     def test_case_insensitive_and_empty_name(self):
-        self.lib.commit_record(PID, 'one', 'Assay A', self.source, None, None, 'today')
+        self.lib.commit_record(PID, 'one', 'Assay A', self.source, None, 'today')
         with self.assertRaises(DuplicateNameError):
-            self.lib.commit_record(PID, 'two', ' assay a ', self.source, None, None, 'today')
+            self.lib.commit_record(PID, 'two', ' assay a ', self.source, None, 'today')
         with self.assertRaises(ValueError):
-            self.lib.commit_record(PID, 'two', '  ', self.source, None, None, 'today')
+            self.lib.commit_record(PID, 'two', '  ', self.source, None, 'today')
 
     def test_restore_duplicate_rejected_and_trash_preserved(self):
         first = self.save()
         self.lib.delete_record(PID, first['id'], first['version'])
         item = self.lib.recycle_items()[0]
-        self.lib.commit_record(PID, 'new', first['name'], self.source, None, None, 'today')
+        self.lib.commit_record(PID, 'new', first['name'], self.source, None, 'today')
         with self.assertRaises(DuplicateNameError):
             self.lib.restore(PID, item['token'])
         self.assertEqual(len(self.lib.recycle_items()), 1)
