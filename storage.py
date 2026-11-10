@@ -127,11 +127,13 @@ class Library:
             raise ValueError('文档路径不在资料库内。')
         return path
 
-    def commit_record(self, pid, rid, name, source, pdf, pages, updated, expected=None):
+    def commit_record(self, pid, rid, name, source, pdf, pages, updated, expected=None, *, inbox=None):
         """Copy immutable files first; atomically publish only after all copies succeed."""
         with self.lock(pid):
             data = self.load(pid)
             self.require_active(data)
+            if inbox is not None and inbox in data.get('inbox_imports', []):
+                return None
             old = next((r for r in data['records'] if r['id'] == rid), None)
             if expected is not None and (old is None or old['version'] != expected):
                 raise ConflictError('该记录已被其他电脑更新，本次不会覆盖。请刷新并核对最新版本。')
@@ -151,13 +153,15 @@ class Library:
             entry = {'id': rid, 'name': name, 'version': version,
                      'source': dest.relative_to(self.root).as_posix(),
                      'pdf': pdf_dest.relative_to(self.root).as_posix() if pdf else '',
-                     'pages': pages if pdf else None, 'updated': updated,
+                     'pages': pages, 'updated': updated,
                      'history': [] if old is None else old.get('history', []) +
                      [{k: v for k, v in old.items() if k != 'history'}]}
             if old:
                 data['records'][data['records'].index(old)] = entry
             else:
                 data['records'].append(entry)
+            if inbox is not None:
+                data.setdefault('inbox_imports', []).append(inbox)
             self.write(data)
             return entry
 

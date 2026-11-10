@@ -1,12 +1,18 @@
 # Assay File Library
 
-Windows 试验记录文档库，v0.2.2 共享盘版，适合小团队在公司 SMB 文件服务器上试用。
+Windows 试验记录文档库，v0.2.3 共享盘版，适合小团队在公司 SMB 文件服务器上试用。
 
 ## 下载与使用
 
-在 [Releases](https://github.com/Huibinox/assay-file-library/releases) 下载最新 ZIP。每台电脑解压一份，双击 `AssayFileLibrary.exe`，点击右上角“选择资料库”，选择同一个公司共享盘文件夹。无需安装 Python，无需登录或填写操作人。
+在 [Releases](https://github.com/Huibinox/assay-file-library/releases) 下载最新 ZIP。每台电脑解压一份，用带 Tkinter 的 Python 3 运行 `python app.py`，再点击右上角“选择资料库”。所有人选择同一个公司共享盘文件夹。
 
 程序应放在各自电脑上运行，资料库放共享盘。保存的位置会记在各电脑的 `%LOCALAPPDATA%/AssayFileLibrary/settings.json` 中。共享盘暂时不可访问时，会提示重新连接，不会自动改用其他库。
+
+## v0.2.3 自动识别 Word 和页数
+
+把 `.docx` 或 `.doc` 放在资料库根目录，文件名包含项目号，例如 `123456-654321-FSA 正式4样本.docx`。也可放进库里的 `projects/<项目号>/` 目录。软件运行时每 15 秒扫描一次，连续两次确认文件状态稳定后自动导入。程序保留投放原文件，同一个投放路径只自动导入一次；更新已有记录请使用“更新所选记录”。重名或缺少项目号会在底部提示。
+
+页数优先由 Word 重新分页读取，即使导出 PDF 失败也能保留页数。无法调用 Word 时，可读取 DOCX 上次保存的页数；没有该信息时显示 `—`。没有 PDF 仍可打开 Word 副本。Word 转换遵循本机 PowerShell 策略。
 
 ## v0.2.2 同名记录检查
 

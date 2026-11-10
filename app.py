@@ -8,6 +8,8 @@ import sys
 import tempfile
 import threading
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 import tkinter as tk
@@ -26,6 +28,18 @@ def expiry_style(value, today=None):
             f'已过期 {-days} 天' if days < 0 else f'剩余 {days} 天')
 
 
+def saved_word_pages(source):
+    if Path(source).suffix.lower() != '.docx':
+        return None
+    try:
+        with zipfile.ZipFile(source) as doc:
+            properties = ET.fromstring(doc.read('docProps/app.xml'))
+        pages = int(properties.findtext('{*}Pages', '0'))
+        return pages if pages > 0 else None
+    except (OSError, ValueError, KeyError, ET.ParseError, zipfile.BadZipFile):
+        return None
+
+
 def convert_word(source, directory):
     pdf = Path(directory) / 'preview.pdf'
     script = Path(directory) / 'convert.ps1'
@@ -37,20 +51,19 @@ try {
  $d=$w.Documents.Open($args[0],$false,$true)
  $d.Repaginate()
  $n=$d.ComputeStatistics(2)
- $d.ExportAsFixedFormat($args[1],17)
  Write-Output $n
+ $d.ExportAsFixedFormat($args[1],17)
 } finally {
  if($d){$d.Close(0)}
  if($w){$w.Quit()}
 }
 """, encoding='utf-8-sig')
-    result = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    result = subprocess.run(['powershell', '-NoProfile', '-File',
                              str(script), str(source), str(pdf)], capture_output=True,
                             text=True, encoding='utf-8', errors='replace', timeout=180,
                             creationflags=0x08000000)
-    if result.returncode or not pdf.exists():
-        raise RuntimeError('Word 转换失败')
-    return pdf, int(result.stdout.strip().splitlines()[-1])
+    pages = next((int(line) for line in result.stdout.splitlines() if re.fullmatch(r'[1-9][0-9]*', line.strip())), None)
+    return (pdf if result.returncode == 0 and pdf.is_file() else None), pages
 
 
 class App:
@@ -61,8 +74,10 @@ class App:
         self.records = {}
         self.busy = False
         self.events = queue.Queue()
+        self.inbox_seen = {}
+        self.inbox_pages = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.2.2 共享盘版')
+        root.title('Assay File 库 · v0.2.3 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -89,7 +104,7 @@ class App:
         self.tree = ttk.Treeview(frame, columns=('pages', 'updated', 'expiry', 'status', 'print'), selectmode='browse')
         self.tree.heading('#0', text='项目号 / 试验记录')
         self.tree.column('#0', width=390)
-        for key, title, width in [('pages', '页数', 60), ('updated', '导入 / 更新日期', 150),
+        for key, title, width in [('pages', 'Word 页数', 80), ('updated', '导入 / 更新日期', 150),
                                   ('expiry', '最近有效期', 120), ('status', '状态', 140), ('print', '操作', 65)]:
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, anchor='center')
@@ -135,6 +150,8 @@ class App:
             if (lib.root / 'library.db').exists() and not projects:
                 messagebox.showwarning('旧版资料库', '检测到 v0.1 的 library.db。新版使用独立的 projects 文件夹。\n旧文档不会自动迁移或删除；请将旧版当前 Word 重新导入，新旧数据可以并存。')
             self.library = lib
+            self.inbox_seen.clear()
+            self.inbox_pages.clear()
             self.projects = {p['id']: p for p in projects}
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             atomic_json(CONFIG, {'library': str(lib.root)})
@@ -176,7 +193,67 @@ class App:
 
     def tick(self):
         self.refresh()
+        if self.library and not self.busy:
+            self.scan_inbox()
         self.root.after(15000, self.tick)
+
+    def scan_inbox(self):
+        library = self.library
+        try:
+            projects = {p['id']: p for p in library.list_projects(include_deleted=True)}
+            folders = [(library.root, None)]
+            folders.extend((folder, folder.name) for folder in library.projects_dir.iterdir()
+                           if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
+            observed = {}
+            jobs = []
+            notices = []
+            pending_names = set()
+            for folder, project_id in folders:
+                for path in sorted(folder.iterdir()):
+                    if path.name.startswith('~$') or path.suffix.lower() not in ('.doc', '.docx') or not path.is_file():
+                        continue
+                    match = re.search(PATTERN, path.stem.upper())
+                    if project_id and match and match.group() != project_id:
+                        notices.append(f'{path.name} 的项目号与所在文件夹不符')
+                        continue
+                    pid = project_id or (match.group() if match else None)
+                    if not pid:
+                        notices.append(f'{path.name} 缺少项目号')
+                        continue
+                    relative = path.relative_to(library.root).as_posix()
+                    data = projects.get(pid, {'id': pid, 'records': []})
+                    if relative.casefold() in data.get('inbox_imports', []) or data.get('deleted'):
+                        continue
+                    stat = path.stat()
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                    observed[relative] = signature
+                    if not stat.st_size or self.inbox_seen.get(relative) != signature:
+                        continue
+                    try:
+                        library.check_name(data, path.stem)
+                    except DuplicateNameError:
+                        notices.append(f'{path.name} 与项目 {pid} 的记录重名')
+                        continue
+                    key = (pid, name_key(path.stem))
+                    if key not in pending_names:
+                        jobs.append((path, pid, uuid.uuid4().hex, path.stem, None))
+                        pending_names.add(key)
+                    else:
+                        notices.append(f'{path.name} 与待导入文件重名')
+            self.inbox_seen = observed
+            if notices:
+                self.note.set('未自动导入：' + '；'.join(notices[:3]) + '。请核对文件名或使用“更新所选记录”。')
+            self.start_jobs(jobs, automatic=True)
+        except (OSError, ValueError) as exc:
+            self.note.set(f'自动扫描失败，下次将重试：{exc}')
+
+    def word_pages(self, record):
+        if record.get('pages'):
+            return record['pages']
+        source = record['source']
+        if source not in self.inbox_pages:
+            self.inbox_pages[source] = saved_word_pages(self.library.resolve(source))
+        return self.inbox_pages[source] or '—'
 
     def selection(self):
         items = self.tree.selection()
@@ -223,7 +300,7 @@ class App:
             for r in matching:
                 self.records[r['id']] = (pid, r)
                 self.tree.insert(parent, 'end', iid='r:' + r['id'], text=r['name'],
-                                 values=(r.get('pages') or '—', r['updated'], '',
+                                 values=(self.word_pages(r), r['updated'], '',
                                          'PDF 就绪' if r.get('pdf') else '无 PDF，可用 Word', '打印'))
         if selected and self.tree.exists(selected):
             self.tree.selection_set(selected)
@@ -313,7 +390,7 @@ class App:
         if path:
             self.start_jobs([(path, pid, r['id'], r['name'], r['version'])])
 
-    def start_jobs(self, jobs):
+    def start_jobs(self, jobs, automatic=False):
         if not jobs:
             return
         self.busy = True
@@ -325,22 +402,35 @@ class App:
                     try:
                         with tempfile.TemporaryDirectory(prefix='assay-') as td:
                             local = Path(td) / ('input' + Path(source).suffix.lower())
+                            before = Path(source).stat() if automatic else None
                             shutil.copyfile(source, local)
+                            if before is not None:
+                                after = Path(source).stat()
+                                if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                                    continue
+                                if local.suffix == '.docx':
+                                    with zipfile.ZipFile(local) as doc:
+                                        doc.getinfo('word/document.xml')
+                            pdf, pages = None, None
                             try:
                                 pdf, pages = convert_word(local, td)
-                            except Exception:
+                            except (OSError, subprocess.SubprocessError):
+                                pass
+                            pages = pages or saved_word_pages(local)
+                            if not pdf and not automatic:
                                 reply = threading.Event()
                                 answer = []
                                 self.events.put(('convert_failed', name, reply, answer))
                                 reply.wait()
                                 if not answer[0]:
                                     continue
-                                pdf, pages = None, None
-                            library.commit_record(pid, rid, name, local, pdf, pages,
-                                                  datetime.now().strftime('%Y-%m-%d %H:%M'), expected)
-                            self.events.put(('saved', name))
+                            inbox = source.relative_to(library.root).as_posix().casefold() if automatic else None
+                            result = library.commit_record(pid, rid, name, local, pdf, pages,
+                                                           datetime.now().strftime('%Y-%m-%d %H:%M'), expected, inbox=inbox)
+                            if result:
+                                self.events.put(('saved', name))
                     except Exception as exc:
-                        self.events.put(('error', exc))
+                        self.events.put(('auto_error' if automatic else 'error', exc))
             finally:
                 self.events.put(('done',))
         threading.Thread(target=worker, daemon=True).start()
@@ -359,6 +449,8 @@ class App:
                 elif event[0] == 'error':
                     self.report_error(event[1])
                     self.note.set('部分操作未完成，请核对提示；原当前版本不会被不完整文件替换。')
+                elif event[0] == 'auto_error':
+                    self.note.set(f'自动导入暂未完成：{event[1]}')
                 elif event[0] == 'done':
                     self.busy = False
                     self.refresh()
