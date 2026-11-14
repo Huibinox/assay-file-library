@@ -24,15 +24,18 @@ CONFIG = Path(os.environ.get('LOCALAPPDATA', str(BASE))) / 'AssayFileLibrary' / 
 def import_name(stem, pid):
     match = re.search(PATTERN, stem.upper())
     label = stem[match.end():].strip(' _-') if match and match.group() == pid else stem.strip()
-    standard = re.fullmatch(r'(SA|Qualification)(_.+)?', label, re.IGNORECASE)
+    standard = re.fullmatch(r'(SA|Qualification)(?:[ _-]+(.+))?', label, re.IGNORECASE)
     if standard:
         purpose = 'SA' if standard[1].lower() == 'sa' else 'Qualification'
-        return purpose + (standard[2] or '')
+        return purpose + ('_' + standard[2] if standard[2] else '')
+    daily = bool(re.match(r'Daily\s+Assay\s+File\b', label, re.IGNORECASE))
     label = re.sub(r'^(?:Daily\s+)?Assay\s+File\b[ _-]*', '', label, flags=re.IGNORECASE)
     qualification = re.search(r'部分验证|验证|(?<![A-Za-z])(?:qualify|qualification|precision)(?![A-Za-z])',
                               label, re.IGNORECASE)
     sample = re.search(r'样本分析|(?<![A-Za-z])sample[ _-]+analysis(?![A-Za-z])',
                        label, re.IGNORECASE)
+    if daily and not qualification and not sample:
+        return 'SA' + ('_' + label if label else '')
     if bool(qualification) == bool(sample):
         return None
     marker = qualification or sample
@@ -132,7 +135,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.2 共享盘版')
+        root.title('Assay File 库 · v0.3.3 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
