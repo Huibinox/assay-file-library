@@ -127,17 +127,17 @@ class App:
         self.root = root
         self.library = library
         self.projects = {}
+        self.reading = False
+        self.metadata = {}
         self.pending_imports = {}
         self.records = {}
         self.busy = False
         self.events = queue.Queue()
         self.inbox_seen = {}
-        self.inbox_pages = {}
-        self.expiry_cache = {}
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.6 共享盘版')
+        root.title('Assay File 库 · v0.3.7 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -196,38 +196,26 @@ class App:
         except (OSError, ValueError):
             value = None
         if value:
-            # Do not recreate a remembered network location if the share is unavailable.
-            if not Path(value).is_dir():
-                self.note.set('上次选择的资料库不可访问，请连接共享盘后重新选择。')
-                return
             self.attach(value)
         else:
             self.choose_library()
 
     def attach(self, value):
-        try:
-            lib = Library(value)
-            projects = lib.list_projects()
-            if (lib.root / 'library.db').exists() and not projects:
-                messagebox.showwarning('旧版资料库', '检测到 v0.1 的 library.db。新版使用独立的 projects 文件夹。\n旧文档不会自动迁移或删除；请将旧版当前 Word 重新导入，新旧数据可以并存。')
-            self.library = lib
-            self.inbox_seen.clear()
-            self.pending_imports.clear()
-            self.inbox_pages.clear()
-            self.expiry_cache.clear()
-            self.live_seen.clear()
-            self.live_done.clear()
-            self.projects = {p['id']: p for p in projects}
-            CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            atomic_json(CONFIG, {'library': str(lib.root)})
-            self.location.set('当前资料库：' + str(lib.root))
-            self.render()
-            self.note.set('资料库已连接。每 15 秒刷新；导入前先在本机准备文档，再安全写入共享库。')
-        except (OSError, ValueError) as exc:
-            messagebox.showerror('无法连接资料库', str(exc))
+        if self.reading:
+            return
+        self.reading = True
+        self.note.set('正在连接资料库…')
+        def worker():
+            try:
+                if not Path(value).is_dir():
+                    raise FileNotFoundError('资料库不可访问，请检查共享盘连接。')
+                self.events.put(('attached', Library(value)))
+            except Exception as exc:
+                self.events.put(('read_error', exc))
+        threading.Thread(target=worker, daemon=True).start()
 
     def choose_library(self):
-        if self.busy:
+        if self.busy or self.reading:
             return messagebox.showinfo('正在处理', '请等待当前导入或更新完成。')
         value = filedialog.askdirectory(title='选择统一资料库文件夹（可选公司共享盘）', mustexist=True)
         if value:
@@ -246,115 +234,120 @@ class App:
             return False
         return True
 
-    def refresh(self):
-        if not self.library:
+    def refresh(self, scan=False):
+        if not self.library or self.reading:
             return
-        try:
-            projects = self.library.list_projects()
-            self.projects = {p['id']: p for p in projects}
-            self.render()
-        except (OSError, ValueError) as exc:
-            self.note.set('资料库读取失败，请检查共享盘连接后刷新。当前列表可能已过时：' + str(exc))
+        self.reading = True
+        library = self.library
+        cache = self.metadata
+        scan = scan and not self.busy
+
+        def worker():
+            try:
+                projects = library.list_projects(include_deleted=True)
+                active = {p['id']: p for p in projects if not p.get('deleted')}
+                metadata = {}
+                for project in active.values():
+                    for record in project['records']:
+                        source = record['source']
+                        path = library.resolve(source)
+                        missing = bool(record.get('snapshot')) and not path.is_file()
+                        key = (source, record['version'])
+                        if key in cache:
+                            pages, expiry, _ = cache[key]
+                        else:
+                            snapshot = library.resolve(record.get('snapshot', source))
+                            pages = record.get('pages') or saved_word_pages(snapshot)
+                            expiry = reagent_expiry(snapshot)
+                        metadata[key] = (pages, expiry, missing)
+                scans = None
+                if scan:
+                    live_jobs, live_seen = self.scan_live(active.values())
+                    jobs, observed, pending = self.scan_inbox(projects)
+                    scans = (live_jobs + jobs, live_seen, observed, pending)
+                self.events.put(('refreshed', active, metadata, scans))
+            except Exception as exc:
+                self.events.put(('read_error', exc))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def tick(self):
-        self.refresh()
-        if self.library and not self.busy:
-            self.scan_live()
-            if not self.busy:
-                self.scan_inbox()
+        self.refresh(scan=True)
         self.root.after(15000, self.tick)
 
-    def scan_live(self):
+    def scan_live(self, projects):
         observed = {}
         jobs = []
-        try:
-            for project in self.library.list_projects():
-                for record in project['records']:
-                    if not record.get('snapshot'):
-                        continue
-                    path = self.library.resolve(record['source'])
-                    try:
-                        stat = path.stat()
-                    except FileNotFoundError:
-                        continue
-                    signature = (stat.st_size, stat.st_mtime_ns)
-                    observed[path] = signature
-                    if stat.st_size and self.live_seen.get(path) == signature and self.live_done.get(path) != signature:
-                        jobs.append((path, project['id'], record['id'], record['name'], record['version']))
-            self.live_seen = observed
-            self.start_jobs(jobs, automatic=True)
-        except (OSError, ValueError) as exc:
-            self.note.set(f'读取共享库失败：{exc}')
-
-    def scan_inbox(self):
-        library = self.library
-        try:
-            projects = {p['id']: p for p in library.list_projects(include_deleted=True)}
-            folders = [(library.root, None)]
-            folders.extend((folder, folder.name) for folder in library.projects_dir.iterdir()
-                           if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
-            managed = {r['source'].casefold() for project in projects.values() for r in project['records']}
-            folders.extend((folder, folder.name) for folder in library.root.iterdir()
-                           if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
-            observed = {}
-            jobs = []
-            pending = {}
-            pending_names = set()
-            for folder, project_id in folders:
-                for path in sorted(folder.iterdir()):
-                    if path.name.startswith('~$') or path.suffix.lower() not in ('.doc', '.docx') or not path.is_file():
-                        continue
-                    relative = path.relative_to(library.root).as_posix()
-                    if relative.casefold() in managed:
-                        continue
-                    match = re.search(PATTERN, path.stem.upper())
-                    pid = project_id or (match.group() if match else None)
-                    data = projects.get(pid, {'id': pid, 'records': []})
-                    if relative.casefold() in data.get('inbox_imports', []):
-                        continue
-                    reason = None
-                    if project_id and match and match.group() != project_id:
-                        reason = '项目号与文件夹不符'
-                    elif not pid:
-                        reason = '缺少项目号'
-                    elif data.get('deleted'):
-                        reason = '项目在回收站'
-                    else:
-                        name = import_name(path.stem, pid)
-                        if name is None:
-                            reason = '用途标记冲突'
-                        else:
-                            key = (pid, name_key(name))
-                            try:
-                                library.check_name(data, name)
-                            except DuplicateNameError:
-                                reason = '与已入库记录重名'
-                            if not reason and key in pending_names:
-                                reason = '与待入库文件重名'
-                    if reason:
-                        pending[relative] = (reason, 'red')
-                        continue
-                    pending_names.add(key)
+        for project in projects:
+            for record in project['records']:
+                if not record.get('snapshot'):
+                    continue
+                path = self.library.resolve(record['source'])
+                try:
                     stat = path.stat()
-                    signature = (stat.st_size, stat.st_mtime_ns)
-                    observed[relative] = signature
-                    pending[relative] = ('等待自动入库', '')
-                    if stat.st_size and self.inbox_seen.get(relative) == signature:
-                        jobs.append((path, pid, uuid.uuid4().hex, name, None))
-            self.inbox_seen = observed
-            self.pending_imports = pending
-            self.render()
-            self.start_jobs(jobs, automatic=True)
-        except (OSError, ValueError) as exc:
-            self.note.set(f'自动扫描失败，下次将重试：{exc}')
+                except FileNotFoundError:
+                    continue
+                signature = (stat.st_size, stat.st_mtime_ns)
+                observed[path] = signature
+                if stat.st_size and self.live_seen.get(path) == signature and self.live_done.get(path) != signature:
+                    jobs.append((path, project['id'], record['id'], record['name'], record['version']))
+        return jobs, observed
 
-    def word_pages(self, record):
-        if record.get('pages'):
-            return record['pages']
-        source = record['source']
-        if source not in self.inbox_pages:
-            self.inbox_pages[source] = saved_word_pages(self.library.resolve(source))
-        return self.inbox_pages[source] or '—'
+    def scan_inbox(self, project_list):
+        library = self.library
+        projects = {p['id']: p for p in project_list}
+        folders = [(library.root, None)]
+        folders.extend((folder, folder.name) for folder in library.projects_dir.iterdir()
+                       if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
+        managed = {r['source'].casefold() for project in projects.values() for r in project['records']}
+        folders.extend((folder, folder.name) for folder in library.root.iterdir()
+                       if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
+        observed = {}
+        jobs = []
+        pending = {}
+        pending_names = set()
+        for folder, project_id in folders:
+            for path in sorted(folder.iterdir()):
+                if path.name.startswith('~$') or path.suffix.lower() not in ('.doc', '.docx') or not path.is_file():
+                    continue
+                relative = path.relative_to(library.root).as_posix()
+                if relative.casefold() in managed:
+                    continue
+                match = re.search(PATTERN, path.stem.upper())
+                pid = project_id or (match.group() if match else None)
+                data = projects.get(pid, {'id': pid, 'records': []})
+                if relative.casefold() in data.get('inbox_imports', []):
+                    continue
+                reason = None
+                if project_id and match and match.group() != project_id:
+                    reason = '项目号与文件夹不符'
+                elif not pid:
+                    reason = '缺少项目号'
+                elif data.get('deleted'):
+                    reason = '项目在回收站'
+                else:
+                    name = import_name(path.stem, pid)
+                    if name is None:
+                        reason = '用途标记冲突'
+                    else:
+                        key = (pid, name_key(name))
+                        try:
+                            library.check_name(data, name)
+                        except DuplicateNameError:
+                            reason = '与已入库记录重名'
+                        if not reason and key in pending_names:
+                            reason = '与待入库文件重名'
+                if reason:
+                    pending[relative] = (reason, 'red')
+                    continue
+                pending_names.add(key)
+                stat = path.stat()
+                signature = (stat.st_size, stat.st_mtime_ns)
+                observed[relative] = signature
+                pending[relative] = ('等待自动入库', '')
+                if stat.st_size and self.inbox_seen.get(relative) == signature:
+                    jobs.append((path, pid, uuid.uuid4().hex, name, None))
+        return jobs, observed, pending
 
     def selection(self):
         items = self.tree.selection()
@@ -401,14 +394,10 @@ class App:
             for r in matching:
                 self.records[r['id']] = (pid, r)
                 source = r['source']
-                missing = bool(r.get('snapshot')) and not self.library.resolve(source).is_file()
-                key = (source, r['version'])
-                if key not in self.expiry_cache:
-                    self.expiry_cache[key] = reagent_expiry(self.library.resolve(r.get('snapshot', source)))
-                expiry = self.expiry_cache[key]
+                pages, expiry, missing = self.metadata.get((source, r['version']), (r.get('pages'), None, False))
                 record_tag, record_status = expiry_style(expiry)
                 self.tree.insert(parent, 'end', iid='r:' + r['id'], text=r['name'],
-                                 values=(self.word_pages(r), r['updated'], expiry or '—',
+                                 values=(pages or '—', r['updated'], expiry or '—',
                                          'Word 文件缺失' if missing else record_status if expiry else '未识别有效期', '打印'),
                                  tags=('red' if missing else record_tag,))
         pending = [(relative, status, tag) for relative, (status, tag) in self.pending_imports.items()
@@ -575,7 +564,34 @@ class App:
         try:
             while True:
                 event = self.events.get_nowait()
-                if event[0] == 'captured':
+                if event[0] == 'attached':
+                    self.reading = False
+                    self.library = event[1]
+                    self.projects = {}
+                    self.metadata = {}
+                    self.pending_imports.clear()
+                    self.inbox_seen.clear()
+                    self.live_seen.clear()
+                    self.live_done.clear()
+                    self.location.set('当前资料库：' + str(self.library.root))
+                    try:
+                        CONFIG.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_json(CONFIG, {'library': str(self.library.root)})
+                    except OSError as exc:
+                        self.note.set(f'无法保存资料库位置：{exc}')
+                    self.render()
+                    self.refresh(scan=True)
+                elif event[0] == 'refreshed':
+                    self.reading = False
+                    _, self.projects, self.metadata, scans = event
+                    if scans and not self.busy:
+                        jobs, self.live_seen, self.inbox_seen, self.pending_imports = scans
+                        self.start_jobs(jobs, automatic=True)
+                    self.render()
+                elif event[0] == 'read_error':
+                    self.reading = False
+                    self.note.set(f'读取资料库失败，下次将重试：{event[1]}')
+                elif event[0] == 'captured':
                     self.live_done[event[1]] = event[2]
                 elif event[0] == 'saved':
                     if len(event) > 2 and event[2]:
@@ -583,7 +599,6 @@ class App:
                             if key.casefold() == event[2]:
                                 self.pending_imports.pop(key)
                     self.note.set('已安全保存：' + event[1])
-                    self.refresh()
                 elif event[0] == 'error':
                     self.report_error(event[1])
                     self.note.set('部分操作未完成，请核对提示；原当前版本不会被不完整文件替换。')
