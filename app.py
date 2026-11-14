@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import queue
@@ -40,6 +41,39 @@ def saved_word_pages(source):
         return None
 
 
+def reagent_expiry(source):
+    if source.suffix.lower() != '.docx':
+        return None
+    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+    try:
+        with zipfile.ZipFile(source) as doc:
+            body = ET.fromstring(doc.read('word/document.xml'))
+    except (OSError, KeyError, ET.ParseError, zipfile.BadZipFile):
+        return None
+    dates = []
+    for table in body.findall('.//w:tbl', ns):
+        rows = [[''.join(t.text or '' for t in cell.findall('.//w:t', ns))
+                 for cell in row.findall('./w:tc', ns)]
+                for row in table.findall('./w:tr', ns)]
+        if not rows or not rows[0]:
+            continue
+        headers = [cell.casefold() for cell in rows[0]]
+        if not any('reagent' in cell or '试剂名称' in cell for cell in headers):
+            continue
+        for column, header in enumerate(headers):
+            if not any(label in header for label in ('exp.', 'exp date', 'expiry', '有效期', '过期日期', '过期日')):
+                continue
+            for row in rows[1:]:
+                if column >= len(row):
+                    continue
+                for match in re.finditer(r'(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)', row[column]):
+                    try:
+                        dates.append(date(*map(int, match.groups())))
+                    except ValueError:
+                        continue
+    return min(dates).isoformat() if dates else None
+
+
 def count_word_pages(source, directory):
     script = Path(directory) / 'word-pages.ps1'
     script.write_text("""$ErrorActionPreference='Stop'
@@ -74,8 +108,11 @@ class App:
         self.events = queue.Queue()
         self.inbox_seen = {}
         self.inbox_pages = {}
+        self.expiry_cache = {}
+        self.live_seen = {}
+        self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.2.4 共享盘版')
+        root.title('Assay File 库 · v0.3.0 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -113,9 +150,10 @@ class App:
         self.tree.tag_configure('yellow', background='#fff0b3')
         self.tree.tag_configure('red', background='#ffd2d2')
         self.tree.bind('<ButtonRelease-1>', self.row_click)
+        self.tree.bind('<Double-1>', self.open_on_double_click)
         actions = ttk.Frame(root, padding=16)
         actions.pack(fill='x')
-        for label, fn in [('打开 Word 副本', self.open_file),
+        for label, fn in [('打开 Word', self.open_file),
                           ('打印所选记录', self.print_file), ('更新所选记录', self.update), ('查看历史', self.history), ('删除所选项', self.delete_selected), ('回收站', self.recycle_bin)]:
             ttk.Button(actions, text=label, command=fn).pack(side='left', padx=4)
         ttk.Label(root, textvariable=self.note, padding=(16, 0, 16, 12), wraplength=1100).pack(fill='x')
@@ -150,6 +188,9 @@ class App:
             self.library = lib
             self.inbox_seen.clear()
             self.inbox_pages.clear()
+            self.expiry_cache.clear()
+            self.live_seen.clear()
+            self.live_done.clear()
             self.projects = {p['id']: p for p in projects}
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             atomic_json(CONFIG, {'library': str(lib.root)})
@@ -192,8 +233,32 @@ class App:
     def tick(self):
         self.refresh()
         if self.library and not self.busy:
-            self.scan_inbox()
+            self.scan_live()
+            if not self.busy:
+                self.scan_inbox()
         self.root.after(15000, self.tick)
+
+    def scan_live(self):
+        observed = {}
+        jobs = []
+        try:
+            for project in self.library.list_projects():
+                for record in project['records']:
+                    if not record.get('snapshot'):
+                        continue
+                    path = self.library.resolve(record['source'])
+                    try:
+                        stat = path.stat()
+                    except FileNotFoundError:
+                        continue
+                    signature = (stat.st_size, stat.st_mtime_ns)
+                    observed[path] = signature
+                    if stat.st_size and self.live_seen.get(path) == signature and self.live_done.get(path) != signature:
+                        jobs.append((path, project['id'], record['id'], record['name'], record['version']))
+            self.live_seen = observed
+            self.start_jobs(jobs, automatic=True)
+        except (OSError, ValueError) as exc:
+            self.note.set(f'读取共享库失败：{exc}')
 
     def scan_inbox(self):
         library = self.library
@@ -201,6 +266,9 @@ class App:
             projects = {p['id']: p for p in library.list_projects(include_deleted=True)}
             folders = [(library.root, None)]
             folders.extend((folder, folder.name) for folder in library.projects_dir.iterdir()
+                           if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
+            managed = {r['source'].casefold() for project in projects.values() for r in project['records']}
+            folders.extend((folder, folder.name) for folder in library.root.iterdir()
                            if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
             observed = {}
             jobs = []
@@ -220,7 +288,7 @@ class App:
                         continue
                     relative = path.relative_to(library.root).as_posix()
                     data = projects.get(pid, {'id': pid, 'records': []})
-                    if relative.casefold() in data.get('inbox_imports', []) or data.get('deleted'):
+                    if relative.casefold() in managed or relative.casefold() in data.get('inbox_imports', []) or data.get('deleted'):
                         continue
                     stat = path.stat()
                     signature = (stat.st_size, stat.st_mtime_ns)
@@ -232,9 +300,13 @@ class App:
                     except DuplicateNameError:
                         notices.append(f'{path.name} 与项目 {pid} 的记录重名')
                         continue
-                    key = (pid, name_key(path.stem))
+                    name = path.stem[len(pid)+1:] if path.stem.upper().startswith(pid + '_') else path.stem
+                    if not re.fullmatch(r'(?:SA|Qualification)(?:_.+)?', name):
+                        notices.append(f'{path.name} 请按 项目号_SA 或 项目号_Qualification 命名')
+                        continue
+                    key = (pid, name_key(name))
                     if key not in pending_names:
-                        jobs.append((path, pid, uuid.uuid4().hex, path.stem, None))
+                        jobs.append((path, pid, uuid.uuid4().hex, name, None))
                         pending_names.add(key)
                     else:
                         notices.append(f'{path.name} 与待导入文件重名')
@@ -297,11 +369,25 @@ class App:
                              tags=(tag,), open=bool(q) or parent in opened)
             for r in matching:
                 self.records[r['id']] = (pid, r)
+                source = r['source']
+                missing = bool(r.get('snapshot')) and not self.library.resolve(source).is_file()
+                key = (source, r['version'])
+                if key not in self.expiry_cache:
+                    self.expiry_cache[key] = reagent_expiry(self.library.resolve(r.get('snapshot', source)))
+                expiry = self.expiry_cache[key]
+                record_tag, record_status = expiry_style(expiry)
                 self.tree.insert(parent, 'end', iid='r:' + r['id'], text=r['name'],
-                                 values=(self.word_pages(r), r['updated'], '',
-                                         'Word 就绪', '打印'))
+                                 values=(self.word_pages(r), r['updated'], expiry or '—',
+                                         'Word 文件缺失' if missing else record_status if expiry else '未识别有效期', '打印'),
+                                 tags=(record_tag,))
         if selected and self.tree.exists(selected):
             self.tree.selection_set(selected)
+
+    def open_on_double_click(self, event):
+        row = self.tree.identify_row(event.y)
+        if row.startswith('r:') and self.tree.identify_column(event.x) != '#5':
+            self.tree.selection_set(row)
+            self.open_file()
 
     def row_click(self, event):
         row = self.tree.identify_row(event.y)
@@ -359,9 +445,9 @@ class App:
             if not re.fullmatch(PATTERN, pid):
                 messagebox.showerror('未导入', '项目号格式不正确。')
                 continue
-            name = Path(path).stem
+            name = 'SA'
             while True:
-                name = simpledialog.askstring('记录名称', f'项目：{pid}\n例如：验证－4样本、正式－11样本', initialvalue=name)
+                name = simpledialog.askstring('记录名称', f'项目：{pid}\n填写 SA 或 Qualification，可加 _4样本 或 _Panel2', initialvalue=name)
                 if name is None:
                     break
                 try:
@@ -384,6 +470,9 @@ class App:
         if not item:
             return
         pid, r = item
+        if r.get('snapshot'):
+            self.open_file()
+            return
         path = filedialog.askopenfilename(filetypes=[('Word 文档', '*.docx *.doc')])
         if path:
             self.start_jobs([(path, pid, r['id'], r['name'], r['version'])])
@@ -409,15 +498,28 @@ class App:
                                 if local.suffix == '.docx':
                                     with zipfile.ZipFile(local) as doc:
                                         doc.getinfo('word/document.xml')
+                            if automatic and expected is not None:
+                                with local.open('rb') as stream:
+                                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                                current = next((r for r in library.load(pid)['records'] if r['id'] == rid), None)
+                                if current and digest == current.get('digest'):
+                                    self.events.put(('captured', source, (before.st_size, before.st_mtime_ns)))
+                                    continue
                             pages = None
                             try:
                                 pages = count_word_pages(local, td)
                             except (OSError, subprocess.SubprocessError):
                                 pass
                             pages = pages or saved_word_pages(local)
+                            if automatic and expected is not None:
+                                library.capture_live(pid, rid, expected, local, pages,
+                                                     datetime.now().strftime('%Y-%m-%d %H:%M'))
+                                self.events.put(('captured', source, (before.st_size, before.st_mtime_ns)))
+                                self.events.put(('saved', name))
+                                continue
                             inbox = source.relative_to(library.root).as_posix().casefold() if automatic else None
                             result = library.commit_record(pid, rid, name, local, pages,
-                                                           datetime.now().strftime('%Y-%m-%d %H:%M'), expected, inbox=inbox)
+                                                           datetime.now().strftime('%Y-%m-%d %H:%M'), expected, inbox=inbox, live=expected is None, incoming=source)
                             if result:
                                 self.events.put(('saved', name))
                     except Exception as exc:
@@ -430,7 +532,9 @@ class App:
         try:
             while True:
                 event = self.events.get_nowait()
-                if event[0] == 'saved':
+                if event[0] == 'captured':
+                    self.live_done[event[1]] = event[2]
+                elif event[0] == 'saved':
                     self.note.set('已安全保存：' + event[1])
                     self.refresh()
                 elif event[0] == 'error':
@@ -465,8 +569,9 @@ class App:
         item = self.record()
         if item:
             try:
-                self.launch(self.local_copy(item[1]['source']))
-                self.note.set('已打开本机副本。编辑后请使用“更新所选记录”导入，库中文档不会被直接修改。')
+                record = item[1]
+                path = self.library.resolve(record['source']) if record.get('snapshot') else self.local_copy(record['source'])
+                self.launch(path)
             except (OSError, ValueError) as exc:
                 self.report_error(exc)
 

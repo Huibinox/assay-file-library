@@ -1,3 +1,4 @@
+import hashlib
 """Per-project JSON storage with SMB-compatible Windows byte-range locks."""
 import contextlib
 import json
@@ -127,7 +128,7 @@ class Library:
             raise ValueError('文档路径不在资料库内。')
         return path
 
-    def commit_record(self, pid, rid, name, source, pages, updated, expected=None, *, inbox=None):
+    def commit_record(self, pid, rid, name, source, pages, updated, expected=None, *, inbox=None, live=False, incoming=None):
         """Copy immutable files first; atomically publish only after all copies succeed."""
         with self.lock(pid):
             data = self.load(pid)
@@ -152,14 +153,64 @@ class Library:
                      'pages': pages, 'updated': updated,
                      'history': [] if old is None else old.get('history', []) +
                      [{k: v for k, v in old.items() if k != 'history'}]}
+            if live:
+                if not re.fullmatch(r'(?:SA|Qualification)(?:_[^<>:"/\\|?*\x00-\x1f]+)?', name) or name.endswith((' ', '.')):
+                    raise ValueError('用途须为 SA 或 Qualification，补充说明须符合 Windows 文件命名规则。')
+                display = self.root / pid / (pid + '_' + name + dest.suffix)
+                display.parent.mkdir(exist_ok=True)
+                adopted = incoming is not None and Path(incoming).resolve() == display.resolve()
+                if not adopted:
+                    if display.exists():
+                        raise DuplicateNameError(f'最新版文件已存在：{display.name}')
+                    fd, temporary = tempfile.mkstemp(dir=display.parent)
+                    os.close(fd)
+                    try:
+                        shutil.copyfile(dest, temporary)
+                        os.rename(temporary, display)
+                    finally:
+                        Path(temporary).unlink(missing_ok=True)
+                with dest.open('rb') as stream:
+                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                entry.update(snapshot=entry['source'], source=display.relative_to(self.root).as_posix(), digest=digest)
             if old:
                 data['records'][data['records'].index(old)] = entry
             else:
                 data['records'].append(entry)
             if inbox is not None:
                 data.setdefault('inbox_imports', []).append(inbox)
-            self.write(data)
+            try:
+                self.write(data)
+            except Exception:
+                if live and not adopted:
+                    display.unlink(missing_ok=True)
+                raise
             return entry
+
+    def capture_live(self, pid, rid, expected, source, pages, updated):
+        with self.lock(pid):
+            data = self.load(pid)
+            self.require_active(data)
+            entry = next((r for r in data['records'] if r['id'] == rid), None)
+            if not entry or entry['version'] != expected:
+                raise ConflictError('记录已变化，下次扫描将重试。')
+            with source.open('rb') as stream:
+                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            if digest == entry['digest']:
+                return
+            current = self.resolve(entry['source'])
+            previous = self.resolve(entry['snapshot'])
+            version = uuid.uuid4().hex
+            history = current.parent / 'history' / current.stem
+            history.mkdir(parents=True, exist_ok=True)
+            archived = history / (entry['updated'].replace(':', '').replace(' ', '_') + '_' + expected[:8] + current.suffix)
+            shutil.copyfile(previous, archived)
+            snapshot = previous.with_name(version + current.suffix)
+            shutil.copyfile(source, snapshot)
+            entry['history'].append({'source': archived.relative_to(self.root).as_posix(),
+                                     'updated': entry['updated'], 'name': entry['name']})
+            entry.update(version=version, snapshot=snapshot.relative_to(self.root).as_posix(),
+                         digest=digest, pages=pages, updated=updated)
+            self.write(data)
 
     @staticmethod
     def require_active(data):
@@ -175,6 +226,30 @@ class Library:
             raise DuplicateNameError(f'项目 {data["id"]} 已有同名记录“{name.strip()}”。\n'
                                      '如需替换文档，请使用“更新所选记录”；如为不同记录，请更改名称。')
 
+    def move_live_files(self, data, records, restoring=False):
+        moved = []
+        try:
+            for record in records:
+                if not record.get('snapshot'):
+                    continue
+                if restoring:
+                    destination = self.resolve(record['source'])
+                    origin = self.resolve(record.pop('recycled_source'))
+                else:
+                    origin = self.resolve(record['source'])
+                    destination = self.folder(data['id']) / 'trash' / uuid.uuid4().hex / origin.name
+                    record['recycled_source'] = destination.relative_to(self.root).as_posix()
+                if destination.exists():
+                    raise DuplicateNameError(f'目标文件已存在：{destination.name}')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(origin, destination)
+                moved.append((origin, destination))
+            self.write(data)
+        except Exception:
+            for origin, destination in reversed(moved):
+                os.rename(destination, origin)
+            raise
+
     def delete_project(self, pid, expected_revision):
         with self.lock(pid):
             data = self.load(pid)
@@ -182,7 +257,7 @@ class Library:
             if data['revision'] != expected_revision:
                 raise ConflictError('项目已更新，请刷新后再删除。')
             data['deleted'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.write(data)
+            self.move_live_files(data, data['records'])
 
     def delete_record(self, pid, rid, expected_version):
         with self.lock(pid):
@@ -194,7 +269,7 @@ class Library:
             data['records'].remove(record)
             data.setdefault('trash', []).append({'token': uuid.uuid4().hex, 'record': record,
                 'deleted': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
-            self.write(data)
+            self.move_live_files(data, [record])
 
     def recycle_items(self):
         items = []
@@ -229,4 +304,4 @@ class Library:
                 record['version'] = uuid.uuid4().hex
                 data['records'].append(record)
                 data['trash'].remove(item)
-            self.write(data)
+            self.move_live_files(data, data['records'] if token is None else [record], restoring=True)
