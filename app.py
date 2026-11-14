@@ -127,6 +127,7 @@ class App:
         self.root = root
         self.library = library
         self.projects = {}
+        self.pending_imports = {}
         self.records = {}
         self.busy = False
         self.events = queue.Queue()
@@ -136,7 +137,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.5 共享盘版')
+        root.title('Assay File 库 · v0.3.6 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -211,6 +212,7 @@ class App:
                 messagebox.showwarning('旧版资料库', '检测到 v0.1 的 library.db。新版使用独立的 projects 文件夹。\n旧文档不会自动迁移或删除；请将旧版当前 Word 重新导入，新旧数据可以并存。')
             self.library = lib
             self.inbox_seen.clear()
+            self.pending_imports.clear()
             self.inbox_pages.clear()
             self.expiry_cache.clear()
             self.live_seen.clear()
@@ -296,47 +298,52 @@ class App:
                            if re.fullmatch(PATTERN, folder.name) and folder.is_dir())
             observed = {}
             jobs = []
-            notices = []
+            pending = {}
             pending_names = set()
             for folder, project_id in folders:
                 for path in sorted(folder.iterdir()):
                     if path.name.startswith('~$') or path.suffix.lower() not in ('.doc', '.docx') or not path.is_file():
                         continue
-                    match = re.search(PATTERN, path.stem.upper())
-                    if project_id and match and match.group() != project_id:
-                        notices.append(f'{path.name} 的项目号与所在文件夹不符')
-                        continue
-                    pid = project_id or (match.group() if match else None)
-                    if not pid:
-                        notices.append(f'{path.name} 缺少项目号')
-                        continue
                     relative = path.relative_to(library.root).as_posix()
-                    data = projects.get(pid, {'id': pid, 'records': []})
-                    if relative.casefold() in managed or relative.casefold() in data.get('inbox_imports', []) or data.get('deleted'):
+                    if relative.casefold() in managed:
                         continue
+                    match = re.search(PATTERN, path.stem.upper())
+                    pid = project_id or (match.group() if match else None)
+                    data = projects.get(pid, {'id': pid, 'records': []})
+                    if relative.casefold() in data.get('inbox_imports', []):
+                        continue
+                    reason = None
+                    if project_id and match and match.group() != project_id:
+                        reason = '项目号与文件夹不符'
+                    elif not pid:
+                        reason = '缺少项目号'
+                    elif data.get('deleted'):
+                        reason = '项目在回收站'
+                    else:
+                        name = import_name(path.stem, pid)
+                        if name is None:
+                            reason = '用途标记冲突'
+                        else:
+                            key = (pid, name_key(name))
+                            try:
+                                library.check_name(data, name)
+                            except DuplicateNameError:
+                                reason = '与已入库记录重名'
+                            if not reason and key in pending_names:
+                                reason = '与待入库文件重名'
+                    if reason:
+                        pending[relative] = (reason, 'red')
+                        continue
+                    pending_names.add(key)
                     stat = path.stat()
                     signature = (stat.st_size, stat.st_mtime_ns)
                     observed[relative] = signature
-                    if not stat.st_size or self.inbox_seen.get(relative) != signature:
-                        continue
-                    name = import_name(path.stem, pid)
-                    if name is None:
-                        notices.append(f'{path.name} 无法识别用途，请手动导入并选择记录名称')
-                        continue
-                    try:
-                        library.check_name(data, name)
-                    except DuplicateNameError:
-                        notices.append(f'{path.name} 与项目 {pid} 的记录重名')
-                        continue
-                    key = (pid, name_key(name))
-                    if key not in pending_names:
+                    pending[relative] = ('等待自动入库', '')
+                    if stat.st_size and self.inbox_seen.get(relative) == signature:
                         jobs.append((path, pid, uuid.uuid4().hex, name, None))
-                        pending_names.add(key)
-                    else:
-                        notices.append(f'{path.name} 与待导入文件重名')
             self.inbox_seen = observed
-            if notices:
-                self.note.set('未自动导入：' + '；'.join(notices[:3]) + '。请核对文件名或使用“更新所选记录”。')
+            self.pending_imports = pending
+            self.render()
             self.start_jobs(jobs, automatic=True)
         except (OSError, ValueError) as exc:
             self.note.set(f'自动扫描失败，下次将重试：{exc}')
@@ -403,13 +410,23 @@ class App:
                 self.tree.insert(parent, 'end', iid='r:' + r['id'], text=r['name'],
                                  values=(self.word_pages(r), r['updated'], expiry or '—',
                                          'Word 文件缺失' if missing else record_status if expiry else '未识别有效期', '打印'),
-                                 tags=(record_tag,))
+                                 tags=('red' if missing else record_tag,))
+        pending = [(relative, status, tag) for relative, (status, tag) in self.pending_imports.items()
+                   if q in relative.casefold()]
+        if pending:
+            group = 'pending-imports'
+            self.tree.insert('', 'end', iid=group, text='待入库 Word', open=True)
+            for relative, status, tag in pending:
+                self.tree.insert(group, 'end', iid='inbox:' + relative, text=Path(relative).name,
+                                 values=('', '', '', status, ''), tags=(tag,))
         if selected and self.tree.exists(selected):
             self.tree.selection_set(selected)
 
     def open_on_double_click(self, event):
         row = self.tree.identify_row(event.y)
-        if row.startswith('r:') and self.tree.identify_column(event.x) != '#5':
+        if row.startswith('inbox:'):
+            self.launch(self.library.resolve(row[len('inbox:'):]).parent)
+        elif row.startswith('r:') and self.tree.identify_column(event.x) != '#5':
             self.tree.selection_set(row)
             self.open_file()
 
@@ -547,9 +564,9 @@ class App:
                             result = library.commit_record(pid, rid, name, local, pages,
                                                            datetime.now().strftime('%Y-%m-%d %H:%M'), expected, inbox=inbox, live=expected is None, incoming=source)
                             if result:
-                                self.events.put(('saved', name))
+                                self.events.put(('saved', name, inbox))
                     except Exception as exc:
-                        self.events.put(('auto_error' if automatic else 'error', exc))
+                        self.events.put(('auto_error', exc, source) if automatic else ('error', exc))
             finally:
                 self.events.put(('done',))
         threading.Thread(target=worker, daemon=True).start()
@@ -561,12 +578,20 @@ class App:
                 if event[0] == 'captured':
                     self.live_done[event[1]] = event[2]
                 elif event[0] == 'saved':
+                    if len(event) > 2 and event[2]:
+                        for key in list(self.pending_imports):
+                            if key.casefold() == event[2]:
+                                self.pending_imports.pop(key)
                     self.note.set('已安全保存：' + event[1])
                     self.refresh()
                 elif event[0] == 'error':
                     self.report_error(event[1])
                     self.note.set('部分操作未完成，请核对提示；原当前版本不会被不完整文件替换。')
                 elif event[0] == 'auto_error':
+                    key = event[2].relative_to(self.library.root).as_posix()
+                    if key in self.pending_imports:
+                        self.pending_imports[key] = (str(event[1]) or '入库失败', 'red')
+                        self.render()
                     self.note.set(f'自动导入暂未完成：{event[1]}')
                 elif event[0] == 'done':
                     self.busy = False
