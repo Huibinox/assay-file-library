@@ -8,7 +8,7 @@ Windows 试验记录文档库，v0.3.3 共享盘试用版，适合小团队在�
 
 程序应放在各自电脑上运行，资料库放共享盘。保存的位置会记在各电脑的 `%LOCALAPPDATA%/AssayFileLibrary/settings.json` 中。共享盘暂时不可访问时，会提示重新连接，不会自动改用其他库。
 
-自动导入支持 Daily Assay File 及以空格连接的 SA 名称，也可识别样本分析、验证、Qualify 和 Precision 等用途标记，并保留 Panel、样本数等补充说明。只有项目号、日期、Panel 或通用 Assay File 字样时，请多选“导入记录”逐份确认名称。
+只有项目号的 Word 按 SA 入库。有备注时保留为 SA_备注，明确的验证标记归为 Qualification。用途标记冲突时请手动确认。
 
 ## v0.3.0 直接编辑共享库
 
