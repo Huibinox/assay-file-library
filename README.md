@@ -1,6 +1,6 @@
 # Assay File Library
 
-Windows 试验记录文档库，v0.3.1 共享盘试用版，适合小团队在公司 SMB 文件服务器上试用。
+Windows 试验记录文档库，v0.3.2 共享盘试用版，适合小团队在公司 SMB 文件服务器上试用。
 
 ## 下载与使用
 
@@ -8,7 +8,7 @@ Windows 试验记录文档库，v0.3.1 共享盘试用版，适合小团队在�
 
 程序应放在各自电脑上运行，资料库放共享盘。保存的位置会记在各电脑的 `%LOCALAPPDATA%/AssayFileLibrary/settings.json` 中。共享盘暂时不可访问时，会提示重新连接，不会自动改用其他库。
 
-旧文件名中的 Daily Assay File 会识别为 SA，带 qualify 会识别为 Qualification，V2 等补充说明会保留。
+自动导入可识别样本分析、验证、Qualify 和 Precision 等用途标记，并保留 Panel、样本数等补充说明。只有项目号、日期、Panel 或通用 Assay File 字样时，请多选“导入记录”逐份确认名称。
 
 ## v0.3.0 直接编辑共享库
 

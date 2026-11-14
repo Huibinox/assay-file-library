@@ -28,13 +28,15 @@ def import_name(stem, pid):
     if standard:
         purpose = 'SA' if standard[1].lower() == 'sa' else 'Qualification'
         return purpose + (standard[2] or '')
-    legacy = re.fullmatch(r'Daily\s+Assay\s+File(?:[ _-]+(.*))?', label, re.IGNORECASE)
-    if not legacy:
+    label = re.sub(r'^(?:Daily\s+)?Assay\s+File\b[ _-]*', '', label, flags=re.IGNORECASE)
+    qualification = re.search(r'部分验证|验证|(?<![A-Za-z])(?:qualify|qualification|precision)(?![A-Za-z])',
+                              label, re.IGNORECASE)
+    sample = re.search(r'样本分析|(?<![A-Za-z])sample[ _-]+analysis(?![A-Za-z])',
+                       label, re.IGNORECASE)
+    if bool(qualification) == bool(sample):
         return None
-    detail = (legacy[1] or '').strip(' _-')
-    qualification = re.match(r'(?:qualify|qualification)(?=$|[ _-])', detail, re.IGNORECASE)
-    if qualification:
-        detail = detail[qualification.end():].strip(' _-')
+    marker = qualification or sample
+    detail = (label[:marker.start()] + ' ' + label[marker.end():]).strip(' _-')
     purpose = 'Qualification' if qualification else 'SA'
     return purpose + ('_' + detail if detail else '')
 
@@ -130,7 +132,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.1 共享盘版')
+        root.title('Assay File 库 · v0.3.2 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -463,12 +465,14 @@ class App:
             if not re.fullmatch(PATTERN, pid):
                 messagebox.showerror('未导入', '项目号格式不正确。')
                 continue
-            name = 'SA'
+            name = import_name(Path(path).stem, pid) or ''
             while True:
-                name = simpledialog.askstring('记录名称', f'项目：{pid}\n填写 SA 或 Qualification，可加 _4样本 或 _Panel2', initialvalue=name)
+                name = simpledialog.askstring('记录名称', f'文件：{Path(path).name}\n项目：{pid}\n填写 SA 或 Qualification，可加 _4样本 或 _Panel2', initialvalue=name)
                 if name is None:
                     break
                 try:
+                    if not re.fullmatch(r'(?:SA|Qualification)(?:_[^<>:"/\\|?*\x00-\x1f]+)?', name.strip()) or name.strip().endswith('.'):
+                        raise ValueError('请输入 SA 或 Qualification，可加下划线和补充说明。')
                     self.library.check_name(self.library.load(pid), name)
                     if any(job[1] == pid and name_key(job[3]) == name_key(name) for job in jobs):
                         raise DuplicateNameError('本次批量导入已有同名记录，请更改名称或取消此项。')
