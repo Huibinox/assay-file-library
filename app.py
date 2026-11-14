@@ -21,6 +21,24 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) el
 CONFIG = Path(os.environ.get('LOCALAPPDATA', str(BASE))) / 'AssayFileLibrary' / 'settings.json'
 
 
+def import_name(stem, pid):
+    match = re.search(PATTERN, stem.upper())
+    label = stem[match.end():].strip(' _-') if match and match.group() == pid else stem.strip()
+    standard = re.fullmatch(r'(SA|Qualification)(_.+)?', label, re.IGNORECASE)
+    if standard:
+        purpose = 'SA' if standard[1].lower() == 'sa' else 'Qualification'
+        return purpose + (standard[2] or '')
+    legacy = re.fullmatch(r'Daily\s+Assay\s+File(?:[ _-]+(.*))?', label, re.IGNORECASE)
+    if not legacy:
+        return None
+    detail = (legacy[1] or '').strip(' _-')
+    qualification = re.match(r'(?:qualify|qualification)(?=$|[ _-])', detail, re.IGNORECASE)
+    if qualification:
+        detail = detail[qualification.end():].strip(' _-')
+    purpose = 'Qualification' if qualification else 'SA'
+    return purpose + ('_' + detail if detail else '')
+
+
 def expiry_style(value, today=None):
     if not value:
         return '', '未设置'
@@ -112,7 +130,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.0 共享盘版')
+        root.title('Assay File 库 · v0.3.1 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -295,14 +313,14 @@ class App:
                     observed[relative] = signature
                     if not stat.st_size or self.inbox_seen.get(relative) != signature:
                         continue
+                    name = import_name(path.stem, pid)
+                    if name is None:
+                        notices.append(f'{path.name} 无法识别用途，请手动导入并选择记录名称')
+                        continue
                     try:
-                        library.check_name(data, path.stem)
+                        library.check_name(data, name)
                     except DuplicateNameError:
                         notices.append(f'{path.name} 与项目 {pid} 的记录重名')
-                        continue
-                    name = path.stem[len(pid)+1:] if path.stem.upper().startswith(pid + '_') else path.stem
-                    if not re.fullmatch(r'(?:SA|Qualification)(?:_.+)?', name):
-                        notices.append(f'{path.name} 请按 项目号_SA 或 项目号_Qualification 命名')
                         continue
                     key = (pid, name_key(name))
                     if key not in pending_names:

@@ -1,12 +1,14 @@
 # Assay File Library
 
-Windows 试验记录文档库，v0.3.0 共享盘试用版，适合小团队在公司 SMB 文件服务器上试用。
+Windows 试验记录文档库，v0.3.1 共享盘试用版，适合小团队在公司 SMB 文件服务器上试用。
 
 ## 下载与使用
 
 在 [Releases](https://github.com/Huibinox/assay-file-library/releases) 下载最新 ZIP。每台电脑解压一份，用带 Tkinter 的 Python 3 运行 `python app.py`，再点击右上角“选择资料库”。所有人选择同一个公司共享盘文件夹。
 
 程序应放在各自电脑上运行，资料库放共享盘。保存的位置会记在各电脑的 `%LOCALAPPDATA%/AssayFileLibrary/settings.json` 中。共享盘暂时不可访问时，会提示重新连接，不会自动改用其他库。
+
+旧文件名中的 Daily Assay File 会识别为 SA，带 qualify 会识别为 Qualification，V2 等补充说明会保留。
 
 ## v0.3.0 直接编辑共享库
 
