@@ -24,6 +24,8 @@ CONFIG = Path(os.environ.get('LOCALAPPDATA', str(BASE))) / 'AssayFileLibrary' / 
 def import_name(stem, pid):
     match = re.search(PATTERN, stem.upper())
     label = stem[match.end():].strip(' _-') if match and match.group() == pid else stem.strip()
+    if match and match.group() == pid and not label:
+        return 'SA'
     standard = re.fullmatch(r'(SA|Qualification)(?:[ _-]+(.+))?', label, re.IGNORECASE)
     if standard:
         purpose = 'SA' if standard[1].lower() == 'sa' else 'Qualification'
@@ -135,7 +137,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.3 共享盘版')
+        root.title('Assay File 库 · v0.3.4 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
