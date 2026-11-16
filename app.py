@@ -4,7 +4,6 @@ import os
 import queue
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -98,30 +97,6 @@ def reagent_expiry(source):
     return min(dates).isoformat() if dates else None
 
 
-def count_word_pages(source, directory):
-    script = Path(directory) / 'word-pages.ps1'
-    script.write_text("""$ErrorActionPreference='Stop'
-$w=$null; $d=$null
-try {
- $w=New-Object -ComObject Word.Application
- $w.Visible=$false; $w.AutomationSecurity=3; $w.DisplayAlerts=0
- $d=$w.Documents.Open($args[0],$false,$true)
- $d.Repaginate()
- $n=$d.ComputeStatistics(2)
- Write-Output $n
-} finally {
- if($d){$d.Close(0)}
- if($w){$w.Quit()}
-}
-""", encoding='utf-8-sig')
-    result = subprocess.run(['powershell', '-NoProfile', '-File',
-                             str(script), str(source)], capture_output=True,
-                            text=True, encoding='utf-8', errors='replace', timeout=180,
-                            creationflags=0x08000000)
-    pages = next((int(line) for line in result.stdout.splitlines() if re.fullmatch(r'[1-9][0-9]*', line.strip())), None)
-    return pages
-
-
 class App:
     def __init__(self, root, library=None):
         self.root = root
@@ -137,7 +112,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.7 共享盘版')
+        root.title('Assay File 库 · v0.3.8 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -514,7 +489,7 @@ class App:
             return
         self.busy = True
         library = self.library
-        self.note.set('正在本机准备 Word 文档，完成后写入资料库；请勿关闭程序。')
+        self.note.set('正在导入或归档 Word…')
         def worker():
             try:
                 for source, pid, rid, name, expected in jobs:
@@ -537,12 +512,7 @@ class App:
                                 if current and digest == current.get('digest'):
                                     self.events.put(('captured', source, (before.st_size, before.st_mtime_ns)))
                                     continue
-                            pages = None
-                            try:
-                                pages = count_word_pages(local, td)
-                            except (OSError, subprocess.SubprocessError):
-                                pass
-                            pages = pages or saved_word_pages(local)
+                            pages = saved_word_pages(local)
                             if automatic and expected is not None:
                                 library.capture_live(pid, rid, expected, local, pages,
                                                      datetime.now().strftime('%Y-%m-%d %H:%M'))
