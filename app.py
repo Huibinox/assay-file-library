@@ -114,7 +114,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.9 共享盘版')
+        root.title('Assay File 库 · v0.3.10 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -363,10 +363,17 @@ class App:
             matching = [r for r in project['records'] if q in pid.lower() or q in r['name'].lower()]
             if q and q not in pid.lower() and not matching:
                 continue
-            tag, status = expiry_style(project.get('expiry'))
+            dates = [project.get('expiry')]
+            for record in project['records']:
+                _, expiry, missing = self.metadata.get(
+                    (record['source'], record['version']), (None, None, False))
+                if not missing:
+                    dates.append(expiry)
+            project_expiry = min((value for value in dates if value), default=None)
+            tag, status = expiry_style(project_expiry)
             parent = 'p:' + pid
             self.tree.insert('', 'end', iid=parent, text=pid,
-                             values=('', '', project.get('expiry') or '未设置', status),
+                             values=('', '', project_expiry or '未设置', status),
                              tags=(tag,), open=bool(q) or parent in opened)
             for r in matching:
                 self.records[r['id']] = (pid, r)
