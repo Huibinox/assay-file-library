@@ -5,6 +5,7 @@ import queue
 import re
 import shutil
 import sys
+import time
 import tempfile
 import threading
 import uuid
@@ -103,6 +104,7 @@ class App:
         self.library = library
         self.projects = {}
         self.reading = False
+        self.import_progress = None
         self.metadata = {}
         self.pending_imports = {}
         self.records = {}
@@ -112,7 +114,7 @@ class App:
         self.live_seen = {}
         self.live_done = {}
         self.note = tk.StringVar(value='请选择资料库。每台电脑安装程序，选择同一个服务器文件夹即可。')
-        root.title('Assay File 库 · v0.3.8 共享盘版')
+        root.title('Assay File 库 · v0.3.9 共享盘版')
         root.geometry('1200x720')
         root.minsize(1000, 560)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -492,7 +494,9 @@ class App:
         self.note.set('正在导入或归档 Word…')
         def worker():
             try:
-                for source, pid, rid, name, expected in jobs:
+                for index, (source, pid, rid, name, expected) in enumerate(jobs, 1):
+                    progress = f"{index}/{len(jobs)} {Path(source).name}"
+                    self.events.put(("progress", "读取源文件", progress))
                     try:
                         with tempfile.TemporaryDirectory(prefix='assay-') as td:
                             local = Path(td) / ('input' + Path(source).suffix.lower())
@@ -508,11 +512,14 @@ class App:
                             if automatic and expected is not None:
                                 with local.open('rb') as stream:
                                     digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+                                self.events.put(("progress", "核对共享库版本", progress))
                                 current = next((r for r in library.load(pid)['records'] if r['id'] == rid), None)
                                 if current and digest == current.get('digest'):
                                     self.events.put(('captured', source, (before.st_size, before.st_mtime_ns)))
                                     continue
+                            self.events.put(("progress", "读取 Word 页数", progress))
                             pages = saved_word_pages(local)
+                            self.events.put(("progress", "写入共享资料库", progress))
                             if automatic and expected is not None:
                                 library.capture_live(pid, rid, expected, local, pages,
                                                      datetime.now().strftime('%Y-%m-%d %H:%M'))
@@ -563,7 +570,11 @@ class App:
                     self.note.set(f'读取资料库失败，下次将重试：{event[1]}')
                 elif event[0] == 'captured':
                     self.live_done[event[1]] = event[2]
+                elif event[0] == 'progress':
+                    self.import_progress = (time.monotonic(), event[1], event[2])
+                    self.note.set(f'{event[1]} {event[2]}')
                 elif event[0] == 'saved':
+                    self.import_progress = None
                     if len(event) > 2 and event[2]:
                         for key in list(self.pending_imports):
                             if key.casefold() == event[2]:
@@ -579,10 +590,15 @@ class App:
                         self.render()
                     self.note.set(f'自动导入暂未完成：{event[1]}')
                 elif event[0] == 'done':
+                    self.import_progress = None
                     self.busy = False
                     self.refresh()
         except queue.Empty:
             pass
+        if self.import_progress:
+            started, stage, filename = self.import_progress
+            if time.monotonic() - started >= 20:
+                self.note.set(f"等待超过 20 秒 · {stage} {filename}")
         self.root.after(100, self.poll)
 
     def launch(self, path, verb='open'):
