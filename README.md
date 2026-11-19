@@ -1,105 +1,110 @@
 # Assay File Library
 
-Windows 试验记录文档库，v0.3.3 共享盘试用版，适合小团队在公司 SMB 文件服务器上试用。
+A Windows document library for assay records, with project search, version history, expiry reminders, and printing. The v0.3.3 shared-drive trial described here is intended for small teams using a company SMB file server.
 
-## 下载与使用
+The software interface remains in Chinese. Chinese control labels and filename examples below refer to the existing application.
 
-在 [Releases](https://github.com/Huibinox/assay-file-library/releases) 下载最新 ZIP。每台电脑解压一份，用带 Tkinter 的 Python 3 运行 `python app.py`，再点击右上角“选择资料库”。所有人选择同一个公司共享盘文件夹。
+## Download and use
 
-程序应放在各自电脑上运行，资料库放共享盘。保存的位置会记在各电脑的 `%LOCALAPPDATA%/AssayFileLibrary/settings.json` 中。共享盘暂时不可访问时，会提示重新连接，不会自动改用其他库。
+Download the latest ZIP from [Releases](https://github.com/Huibinox/assay-file-library/releases). Extract a separate copy on each computer, run `python app.py` using Python 3 with Tkinter, and click Select Library (`选择资料库`) in the top-right corner. Everyone selects the same shared folder.
 
-只有项目号的 Word 按 SA 入库。有备注时保留为 SA_备注，明确的验证标记归为 Qualification。用途标记冲突时请手动确认。
+Run the program locally and keep the library on the shared drive. Each computer stores its selected path in `%LOCALAPPDATA%/AssayFileLibrary/settings.json`. If the share becomes unavailable, the application asks you to reconnect rather than switching libraries automatically.
 
-## v0.3.0 直接编辑共享库
+Word files containing only a project number are imported as SA. Notes are retained as SA_note; explicit validation markers are classified as Qualification. Conflicting purpose markers require manual confirmation.
 
-运行 python app.py，选择共享资料库。建议先用测试文件夹试用。
-导入时填写 SA、Qualification，或 SA_4样本、Qualification_Panel2 等。
-也可放入文件名符合命名规则的 Word，程序将自动识别。
+## v0.3.0: Edit the shared library directly
 
-最新版位于 资料库/项目号/项目号_用途[_补充说明].docx。
-双击记录行或在资源管理器打开最新版，在 Word 中直接保存。
-程序运行时每 15 秒扫描，连续两次确认文件状态稳定后更新页数和试剂有效期。
-旧版保存在项目的 history 目录。程序停用期间或两次扫描之间的中间保存可能无法归档。
+Run `python app.py` and select the shared library. Try a test folder first. During import, enter a purpose such as SA, Qualification, `SA_4样本`, or Qualification_Panel2. Word files matching the naming rules can also be detected automatically.
 
-使用“删除所选项”将记录或项目移入回收站。恢复会将 Word 放回项目文件夹。
-外部直接删除或改名的文件会显示缺失。历史仍可查看，不会自动将改名合并。
-既有旧布局记录仍用副本方式打开，新导入使用新布局。团队应使用同一新版。
+The current document is stored at `<library>/<project number>/<project number>_<purpose>[_<additional note>].docx`. Double-click a record or open its current file in File Explorer, then save directly in Word.
 
-## 旧版操作说明
+While running, the application scans every 15 seconds. It updates page counts and reagent expiry dates after two consecutive checks show a stable file. Older versions are stored in the project's `history` directory. Intermediate saves made while the application is closed or between scans may not be archived.
 
-## 自动识别 Word 和页数
+Delete Selected (`删除所选项`) moves records or projects to the recycle bin. Restore returns Word files to the project folder. Externally deleted or renamed files appear as missing; history remains available, and renamed files are not merged automatically.
 
-把 `.docx` 或 `.doc` 放在资料库根目录，文件名包含项目号，例如 `123456-654321-FSA 正式4样本.docx`。也可放进库里的 `projects/<项目号>/` 目录。软件运行时每 15 秒扫描一次，连续两次确认文件状态稳定后自动导入。程序保留投放原文件，同一个投放路径只自动导入一次；更新已有记录请使用“更新所选记录”。重名或缺少项目号会在底部提示。
+Records using the older layout still open as copies. New imports use the new layout. All team members should use the same updated version.
 
-页数读取 DOCX 上次保存的页数。没有该信息或使用旧版 DOC 格式时显示 `—`。
+## Earlier versions
 
-## v0.2.2 同名记录检查
+### Automatic Word detection and page counts
 
-同一项目的当前记录名称不允许重复（忽略首尾空格及英文大小写）。导入时可重新填写名称或取消该项；本次批量导入也会检查重名。保存时在项目锁内再次检查，避免多人同时导入重复记录。已有记录的文件替换请使用“更新所选记录”。不同项目可以使用相同名称。回收站恢复也会检查当前同名记录，冲突时保留回收站内容。旧库已有的重名记录不会自动合并或删除，可自行核对处理，仍允许更新原记录。请统一升级所有电脑，以免旧版绕过新增检查。
+Place .docx or .doc files in the library root with a project number in the filename, for example `123456-654321-FSA 正式4样本.docx`. Files can also be placed in `projects/<project number>/`. While running, the application scans every 15 seconds and imports files after two consecutive stable checks.
 
-## v0.2.1 删除与回收站
+Original dropped files are retained. Each source path is automatically imported once; use Update Selected Record (`更新所选记录`) to update an existing record. Duplicate names and missing project numbers are reported in the footer.
 
-选择项目或记录，点击“删除所选项”，确认后移入回收站。整个项目删除时，其当前记录及历史一并隐藏。点击“回收站”可恢复。删除与恢复均使用项目锁和冲突检查。
+DOCX page counts use the value saved by Word. Missing page-count metadata and legacy DOC files display a dash.
 
-这属于可恢复删除，不释放磁盘空间，本版不提供永久清除。恢复整个项目后，原先已单独删除的记录仍留在回收站。
+### v0.2.2: Duplicate record names
 
-从 v0.2.0 升级可继续选择原来的共享库，无需重新导入。新版写入时将项目格式升级为 schema 3，旧版会拒绝读取，防止它忽略删除状态。请先让所有人关闭旧版，备份共享库，再统一升级所有电脑；升级后不要退回旧版写入。
+Current record names must be unique within a project, ignoring leading/trailing spaces and English letter case. Rename or cancel an import when prompted. Duplicate names within a batch are also checked. The name is checked again under the project lock during saving to prevent concurrent duplicate imports.
 
-## 功能
+Use Update Selected Record to replace an existing file. Different projects may use the same record name. Restore also checks for duplicate current names; conflicting items remain in the recycle bin. Pre-existing duplicates are not merged or deleted automatically and can still be updated. Upgrade every computer so older clients cannot bypass these checks.
 
-- 项目号：六位公司号-六位项目号-FSA，可带 -HGR 后缀。
-- 一个项目可添加多份记录，例如“验证－4样本”“正式－11样本”。
-- 支持按项目号或记录名称搜索、多选导入 Word；每份记录有打印入口。
-- 项目级最近有效期手动填写：6～30 天黄色，0～5 天及已过期红色。
-- 显示 Word 页数；更新时保留历史版本。
-- 打开 Word 使用本机临时副本，避免直接编辑共享库当前文件。
-- 每 15 秒刷新，也可手动刷新。打印确认期间如发现记录已更新，会要求重新核对。
+### v0.2.1: Deletion and recycle bin
 
-## 共享盘保存方式
+Select a project or record and click Delete Selected, then confirm. Deleting a whole project hides its current records and history. Open Recycle Bin (`回收站`) to restore items. Deletion and restoration use project locks and conflict checks.
 
-每个项目保存在 `projects/<项目号>/project.json`，Word 和各版本保存在对应项目的 `records/` 内。全部文档路径相对于资料库保存，其他电脑可使用不同的盘符映射。
+Deletion is recoverable and does not free disk space; this version has no permanent purge. Restoring a project does not restore records that had already been deleted individually.
 
-写入期间使用 Windows 文件范围锁，锁粒度为项目。不同项目可分别更新；同一项目写入忙时提示稍后重试。锁由操作系统持有，进程退出后释放，不依赖操作人姓名，也不要手动删除 `.write.lock` 文件。
+When upgrading from v0.2.0, select the existing shared library without reimporting. The newer writer upgrades projects to schema 3, which older versions refuse to read so they cannot ignore deletion state. Close old clients, back up the shared library, and upgrade all computers together. Do not write to the upgraded library using an older version.
 
-导入前先在本机准备 Word，再把完整文件复制到共享库，最后原子替换项目索引。文档版本与项目修改都有冲突检查，过时的更新不会静默覆盖新版。
+## Earlier-version features
 
-所有五台电脑必须使用新版及其写入方式，不要手动编辑项目 JSON 或覆盖库内文件。文件服务器需支持 SMB 文件范围锁及同目录重命名，并允许用户创建、写入和重命名文件。此版本没有账号权限系统，共享盘权限由公司设置；能直接访问库文件的人仍能在资源管理器修改文件。
+- Project identifiers follow a six-digit company number, a six-digit project number, and FSA, with an optional -HGR suffix.
+- Projects can contain multiple records, such as validation records for four samples or routine records for eleven samples.
+- Search by project number or record name; import multiple Word files and print individual records.
+- Enter the nearest project expiry date manually: 6–30 days remaining is yellow; 0–5 days and expired dates are red.
+- Display Word page counts and preserve older versions on update.
+- Open Word as a local temporary copy to protect the shared current file.
+- Refresh every 15 seconds or manually. If a record changes during print confirmation, review it again.
 
-## Word、打印与备份
+The copy-based opening behaviour above describes the earlier layout; v0.3.0 introduces direct editing for the new layout.
 
-打印依赖系统 Word 关联程序及打印机。打印请求发出不代表纸张已输出；不支持系统打印命令时请打开 Word 副本后手动打印。
+## Shared-drive storage
 
-修改文档后，用“更新所选记录”重新导入。更新日期表示导入/更新操作时间，不代表受控文档生效日期。
+In the earlier layout, each project uses `projects/<project number>/project.json`, with Word documents and versions in its `records/` directory. Document paths are relative to the library, allowing different drive mappings on different computers.
 
-备份整个资料库，最好在大家停止修改后备份，或由公司服务器做一致的快照备份。预览和打印会在本机系统临时目录生成副本，按公司终端管理策略清理。
+Writes use Windows file-range locks at project level. Different projects can be updated independently; a busy project asks users to retry. The operating system holds the lock and releases it when the process exits. It does not depend on the operator's name. Do not delete `.write.lock` manually.
 
-## 从 v0.1 升级
+Word files are prepared locally and copied in full to the shared library before the project index is atomically replaced. Document versions and project changes are checked for conflicts; stale updates do not silently overwrite newer ones.
 
-旧版 `library.db` 不会修改或删除；新版不再使用它。请先保留备份，由一人把旧库的当前 Word 重新导入新版，再填写有效期。旧历史版本仍保留在旧库中。所有人切换新版后再开始共同维护。新版不是旧 SQLite 库的自动迁移工具。
+All five computers must use the updated version and its write mechanism. Do not edit project JSON or overwrite library files manually. The server must support SMB file-range locks and same-directory renaming, and users need permission to create, write, and rename files. This version has no account permission system. Company share permissions apply, and users with direct file access can still modify files in File Explorer.
 
-## 源码运行与构建
+## Word, printing, and backups
 
-需要 Python 3 和 tkinter。运行：
+Printing depends on the Windows Word file association and printer. A submitted request does not confirm physical output. If the system print command is unsupported, open the Word copy and print manually.
+
+For the earlier copy-based workflow, reimport edited documents with Update Selected Record. The update date records the import/update operation, not the effective date of a controlled document.
+
+Back up the entire library, preferably while users have stopped editing, or use a consistent server snapshot. Preview and printing create copies in the local system temporary directory; clean these according to company endpoint policies.
+
+## Upgrading from v0.1
+
+The old `library.db` is neither modified nor deleted and is no longer used by the newer version. Preserve a backup. Have one person reimport current Word documents into a new library and enter expiry dates. Old version history remains in the old library. Begin shared maintenance only after everyone has switched. This is not an automatic migration tool for the old SQLite library.
+
+## Run from source and build
+
+Requires Python 3 and tkinter.
 
 ```powershell
 python app.py
 ```
 
-构建：
+Optional build:
 
 ```powershell
 python -m pip install pyinstaller
 python -m PyInstaller --noconfirm --onefile --windowed --name AssayFileLibrary app.py
 ```
 
-测试：
+Tests:
 
 ```powershell
 python -m unittest discover -v
 ```
 
-## 验证范围
+## Verification scope
 
-已在本机 Windows 验证跨进程写锁、进程异常退出后锁释放、旧版本冲突、独立项目写入、复制/索引替换失败时保留当前版、相对路径和资料库搬迁，并检查界面及 EXE 启动。
+Local Windows checks covered cross-process write locks, lock release after abnormal exits, stale-version conflicts, independent project writes, preservation of the current version after copy/index replacement failures, relative paths, and library relocation. The interface and EXE startup were also checked.
 
-尚未在用户公司的真实 SMB 服务器验证网络中断、服务器重启及五台电脑同时操作，也未验证实际实验记录分页和打印机输出。正式共用前请先用两台电脑及脱敏文档试验：一台更新时另一台查看、两台更新同一份记录、共享盘断开后恢复连接。网络断开后锁是否被服务器正确回收取决于 SMB 服务实现，不能把本机测试视为服务器验证。
+Network interruption, server restart, and five simultaneous clients have not been verified on the company's actual SMB server. Actual assay-record pagination and physical printing have also not been verified. Before shared use, test de-identified documents on two computers: view while another client updates, update the same record concurrently, and disconnect/reconnect the share. Server-side lock recovery after a network interruption depends on the SMB implementation; local checks do not validate the server.
